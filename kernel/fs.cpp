@@ -3,12 +3,14 @@
 #include "drivers/storage/ata.h"
 #include "drivers/storage/disk_manager.h"
 #include "drivers/timer/pit.h"
+#include "drivers/power/rtc.h"
 #include "serial_log.h"
 #include "heap.h"
+#include "sched/task.h"
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
-#include <string.h>
+#include "string.h"
 
 #define FS_TXN_MAGIC 0x4A524E31u /* JRN1 */
 #define FS_INDIRECT_MAX ((FS_SECTOR_SIZE) / (uint32_t)sizeof(struct fs_extent))
@@ -45,8 +47,20 @@ static uint32_t fs_csum32(const void* data, size_t len) {
     return sum;
 }
 
-uint32_t fs_now(void) { return timer_ms() / 1000u; }
-uint16_t fs_current_uid(void) { return g_uid; }
+uint32_t fs_now(void) {
+    /* Реальное время из RTC (epoch, сек); до инициализации RTC — uptime. */
+    if (rtc_valid()) return (uint32_t)(rtc_unix_seconds());
+    return timer_ms() / 1000u;
+}
+uint16_t fs_current_uid(void) {
+    /* В контексте задачи (с хуками/процессами) права берутся из текущей задачи.
+       g_uid остаётся fallback до инициализации планировщика. */
+    if (sched_ready()) {
+        struct task* cur = sched_current();
+        if (cur) return cur->uid;
+    }
+    return g_uid;
+}
 void fs_set_current_uid(uint16_t uid) { g_uid = uid; }
 
 static uint32_t fs_inode_sectors(void) {
@@ -635,9 +649,10 @@ const struct fs_inode* fs_entry_at(int idx) {
 int fs_access_ok(int idx, int want_write) {
     if (idx <= 0 || idx >= (int)FS_MAX_INODES) return -1;
     if (!(inodes[idx].flags & FS_FLAG_OCCUPIED)) return -1;
-    if (g_uid == 0) return 0;
+    uint16_t uid = fs_current_uid();
+    if (uid == 0) return 0;
     uint16_t mode = inodes[idx].mode;
-    if (inodes[idx].uid == g_uid) {
+    if (inodes[idx].uid == uid) {
         if (want_write) return (mode & 0200) ? 0 : -1;
         return (mode & 0400) ? 0 : -1;
     }
@@ -801,7 +816,7 @@ int fs_create_file(const char* path, uint16_t mode) {
     memset(&inodes[idx], 0, sizeof(inodes[idx]));
     inodes[idx].flags = FS_FLAG_OCCUPIED;
     inodes[idx].mode = mode ? mode : FS_MODE_FILE;
-    inodes[idx].uid = g_uid;
+    inodes[idx].uid = fs_current_uid();
     inodes[idx].gid = 0;
     inodes[idx].nlink = 1;
     inodes[idx].parent = (uint32_t)parent;
@@ -1239,7 +1254,8 @@ int fs_stat(const char* path, struct fs_stat* st) {
 int fs_chmod(const char* path, uint16_t mode) {
     int idx = fs_lookup_index(path, false);
     if (idx < 0) return -1;
-    if (g_uid != 0 && inodes[idx].uid != g_uid) return -1;
+    uint16_t uid = fs_current_uid();
+    if (uid != 0 && inodes[idx].uid != uid) return -1;
     inodes[idx].mode = mode;
     inodes[idx].ctime = fs_now();
     return fs_persist_meta();
@@ -1248,7 +1264,7 @@ int fs_chmod(const char* path, uint16_t mode) {
 int fs_chown(const char* path, uint16_t uid, uint16_t gid) {
     int idx = fs_lookup_index(path, false);
     if (idx < 0) return -1;
-    if (g_uid != 0) return -1;
+    if (fs_current_uid() != 0) return -1;
     inodes[idx].uid = uid;
     inodes[idx].gid = gid;
     inodes[idx].ctime = fs_now();
@@ -1352,7 +1368,7 @@ int fs_create_dir(const char* path) {
                 inodes[idx].flags = FS_FLAG_OCCUPIED | FS_FLAG_DIRECTORY;
                 inodes[idx].mode = FS_MODE_DIR;
                 inodes[idx].nlink = 1;
-                inodes[idx].uid = g_uid;
+                inodes[idx].uid = fs_current_uid();
                 inodes[idx].parent = (uint32_t)parent;
                 inodes[idx].atime = inodes[idx].mtime = inodes[idx].ctime = fs_now();
                 if (dir_add_entry(parent, (uint32_t)idx, p) != 0) {

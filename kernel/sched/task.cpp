@@ -6,9 +6,11 @@
 #include "drivers/network/core/net_ports.h"
 #include "fs_file.h"
 #include "mm/paging.h"
+#include "elf.h"
 #include <stddef.h>
 
 extern "C" void sched_switch(uint32_t** old_esp, uint32_t* new_esp);
+extern "C" void user_mode_enter(uint32_t user_eip, uint32_t user_esp);
 
 static struct task g_tasks[TASK_MAX];
 static struct task* g_current = 0;
@@ -130,6 +132,78 @@ int task_enable_aspace(int id) {
     return 0;
 }
 
+static struct task* task_alloc_slot(void);
+static void task_setup_stack(struct task* t);
+static uint32_t user_stack_alloc(void);
+static void user_task_trampoline(void* arg);
+
+/* Выделение identity-слота стека для user-процесса (4MB страница PSE). */
+#define USER_STACK_SLOT_START 0x01000000u
+#define USER_STACK_SLOT_STEP  0x00400000u
+#define TASK_UID_USER         1000
+
+int task_spawn_user(const uint8_t* elf_img, size_t elf_len, const char* name) {
+    if (!g_sched_ready || !elf_img || elf_len < 16) return -1;
+
+    uint32_t entry = 0;
+    if (elf32_load(elf_img, elf_len, &entry) != 0) return -2;
+    if (entry == 0) return -3;
+
+    struct task* t = task_alloc_slot();
+    if (!t) return -4;
+
+    uint8_t* kstack = (uint8_t*)malloc(TASK_STACK_SIZE);
+    uint32_t dir = paging_create_identity_dir();
+    if (!kstack || !dir) {
+        if (kstack) free(kstack);
+        t->state = TASK_UNUSED;
+        return -5;
+    }
+
+    t->id = g_next_id++;
+    t->state = TASK_READY;
+    t->stack = kstack;
+    t->entry = user_task_trampoline;
+    t->arg = 0;
+    t->runs = 0;
+    t->wake_ms = 0;
+    t->wait_reason = WAIT_NONE;
+    t->is_idle = false;
+    t->parent_pid = g_current ? g_current->id : -1;
+    t->cr3 = dir;
+    t->is_user = true;
+    t->user_entry = entry;
+    t->user_stack = user_stack_alloc();
+    t->kstack_top = (uint32_t)(kstack + TASK_STACK_SIZE);
+    t->uid = TASK_UID_USER;
+    task_copy_name(t->name, name ? name : "user");
+    if (g_current) task_copy_str(t->cwd, TASK_CWD_MAX, g_current->cwd);
+    else {
+        t->cwd[0] = '/';
+        t->cwd[1] = 0;
+    }
+    task_fds_clear(t);
+    task_setup_stack(t);
+
+    /* Страничная изоляция: помечаем как user только сегменты ELF и стек. */
+    {
+        uint32_t lo = 0, hi = 0;
+        if (elf32_user_ranges(elf_img, elf_len, &lo, &hi) != 0) {
+            task_resources_cleanup(t->id);
+            t->state = TASK_UNUSED;
+            return -6;
+        }
+        for (uint32_t va = lo & ~(USER_STACK_SLOT_STEP - 1u); va < hi; va += USER_STACK_SLOT_STEP) {
+            paging_mark_user_pde(dir, va >> 22);
+        }
+        paging_mark_user_pde(dir, (t->user_stack - USER_STACK_SLOT_STEP) >> 22);
+    }
+
+    log_fmt3(LOG_INFO, "sched", "spawn_user", "id", (uint32_t)t->id,
+             "entry", entry, "stack", t->user_stack);
+    return t->id;
+}
+
 static void task_slot_clear(struct task* t) {
     if (t->state != TASK_UNUSED && t->id != TASK_PID_SYSTEMD) {
         task_resources_cleanup(t->id);
@@ -153,6 +227,7 @@ static void task_slot_clear(struct task* t) {
     t->cwd[1] = 0;
     t->cr3 = 0;
     t->is_user = false;
+    t->uid = 0;
     task_fds_clear(t);
 }
 
@@ -172,6 +247,29 @@ static void task_trampoline(void) {
         t->entry(t->arg);
     }
     task_exit();
+}
+
+/* Точка входа ring3-процесса: смена привилегий через iret на пользовательский стек. */
+static void user_task_trampoline(void* arg) {
+    (void)arg;
+    struct task* t = g_current;
+    if (!t || !t->is_user || !t->user_entry) {
+        task_exit();
+        return;
+    }
+    paging_set_user_esp0(t->kstack_top);
+    user_mode_enter(t->user_entry, t->user_stack);
+    task_exit();
+}
+
+/* Выделение identity-слота стека для user-процесса (4MB страница PSE). */
+static uint32_t g_user_stack_next = USER_STACK_SLOT_START;
+
+static uint32_t user_stack_alloc(void) {
+    uint32_t slot = g_user_stack_next;
+    g_user_stack_next += USER_STACK_SLOT_STEP;
+    if (g_user_stack_next >= ELF_USER_VA_MAX) g_user_stack_next = USER_STACK_SLOT_START;
+    return slot + USER_STACK_SLOT_STEP; /* top of the slot */
 }
 
 static void sched_wake_sleepers(void) {
@@ -218,6 +316,7 @@ void sched_init(void) {
     boot->cwd[1] = 0;
     boot->cr3 = 0;
     boot->is_user = false;
+    boot->uid = 0;
     task_fds_clear(boot);
 
     g_current = boot;
@@ -262,6 +361,7 @@ int task_create(task_entry_fn entry, void* arg, const char* name) {
     t->parent_pid = g_current ? g_current->id : -1;
     t->cr3 = 0;
     t->is_user = false;
+    t->uid = g_current ? g_current->uid : 0;
     task_copy_name(t->name, name ? name : "kthread");
     if (g_current) task_copy_str(t->cwd, TASK_CWD_MAX, g_current->cwd);
     else {
@@ -297,6 +397,7 @@ int task_fork(task_entry_fn entry, void* arg, const char* name) {
     else
         t->cr3 = 0;
     t->is_user = g_current->is_user;
+    t->uid = g_current->uid;
     task_copy_name(t->name, name ? name : "child");
     task_copy_str(t->cwd, TASK_CWD_MAX, g_current->cwd);
     task_fds_copy(t, g_current);
@@ -366,6 +467,36 @@ int task_getcwd_pid(int pid, char* out, size_t out_cap) {
         return 0;
     }
     return -1;
+}
+
+int task_getuid(void) {
+    if (g_current) return (int)g_current->uid;
+    return 0;
+}
+
+static struct task* task_find_by_id_n(int id) {
+    if (id < 0) return 0;
+    for (int i = 0; i < TASK_MAX; i++) {
+        if (g_tasks[i].state == TASK_UNUSED) continue;
+        if (g_tasks[i].id == id) return &g_tasks[i];
+    }
+    return 0;
+}
+
+int task_setuid(uint16_t uid) {
+    if (!g_current) return -1;
+    /* Менять чужой uid может только root; свой — всегда. */
+    if (g_current->uid != 0 && g_current->uid != uid) return -1;
+    g_current->uid = uid;
+    return 0;
+}
+
+int task_setuid_pid(int pid, uint16_t uid) {
+    if (!g_current || g_current->uid != 0) return -1;
+    struct task* t = task_find_by_id_n(pid);
+    if (!t) return -1;
+    t->uid = uid;
+    return 0;
 }
 
 int task_fd_alloc(uint8_t type, int handle, const char* path) {
@@ -454,6 +585,10 @@ static void sched_switch_to(struct task* next) {
     g_yield_count++;
     g_slice_left = TASK_SLICE_TICKS;
     g_need_resched = 0;
+
+    if (next->is_user && next->kstack_top) {
+        paging_set_user_esp0(next->kstack_top);
+    }
 
     sched_switch(&prev->esp, next->esp);
 }
@@ -605,6 +740,9 @@ void task_exit(void) {
     {
         uint32_t ncr3 = next->cr3 ? next->cr3 : paging_kernel_cr3();
         paging_load_cr3(ncr3);
+    }
+    if (next->is_user && next->kstack_top) {
+        paging_set_user_esp0(next->kstack_top);
     }
     sched_switch(&discarded, next->esp);
     while (1) asm volatile ("hlt");

@@ -9,7 +9,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
-#include <string.h>
+#include "string.h"
 
 static void fs_at_ok(const char* step) {
     terminal_writestring("\n[AUTOTEST] fs ");

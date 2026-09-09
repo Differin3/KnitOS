@@ -56,14 +56,17 @@ syscall_handler_asm:
     ; Теперь сохраняем все регистры
     pushad
     
-    ; Вызываем C обработчик (аргумент - указатель на структуру на стеке)
+    ; Вызываем C обработчик (аргументы: указатель на структуру на стеке, CS вызывающего)
     ; Структура находится по смещению 32 от текущего esp (8 регистров * 4)
     mov eax, esp
     add eax, 32
+    ; Смещение CS: 5 аргументов (20 байт) + 4 байта = 24 от базы структуры
+    mov edx, [eax + 24]  ; caller CS (0x1B = ring3, 0x08 = ring0)
+    push edx
     push eax
     call syscall_handler
-    add esp, 4  ; Убираем аргумент
-    
+    add esp, 8  ; Убираем аргументы (args*, cs)
+
     ; Сохраняем результат в место где был сохранен EAX в pushad
     ; После pushad EAX находится по смещению 28 от текущего esp
     mov [esp + 28], eax
@@ -123,6 +126,25 @@ ring3_enter:
 ring3_cont:
     pop ebp
     ret
+
+; void user_mode_enter(uint32_t user_eip, uint32_t user_esp)
+; Переключение ring0 -> ring3 (вызывается из задачи, больше не возвращается).
+global user_mode_enter
+user_mode_enter:
+    mov ecx, [esp + 4]   ; user eip
+    mov edx, [esp + 8]   ; user esp
+    mov ax, 0x23         ; user data selector
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    push dword 0x23      ; SS
+    push edx             ; user ESP
+    pushfd
+    or dword [esp], 0x200 ; IF=1
+    push dword 0x1B      ; user CS
+    push ecx             ; user EIP
+    iretd
 
 ; Обработчик по умолчанию для всех прерываний
 global default_handler

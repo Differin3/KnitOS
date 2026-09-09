@@ -1,0 +1,30 @@
+BITS 32
+
+section .user progbits alloc noexec nowrite
+global user_demo_start
+global user_demo_end
+global user_demo_size
+global user_demo2_start
+global user_demo2_end
+global user_demo2_size
+global user_demo3_start
+global user_demo3_end
+global user_demo3_size
+
+user_demo_start:
+    incbin "user/hello.elf"
+user_demo_end:
+user_demo_size:
+    dd user_demo_end - user_demo_start
+
+user_demo2_start:
+    incbin "user/demo2.elf"
+user_demo2_end:
+user_demo2_size:
+    dd user_demo2_end - user_demo2_start
+
+user_demo3_start:
+    incbin "user/demo3.elf"
+user_demo3_end:
+user_demo3_size:
+    dd user_demo3_end - user_demo3_start

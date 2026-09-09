@@ -1,7 +1,7 @@
 #include "fs_cache.h"
 #include "drivers/storage/ata.h"
 #include "fs.h"
-#include <string.h>
+#include "string.h"
 
 struct cache_slot {
     bool used;

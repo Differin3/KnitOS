@@ -17,6 +17,7 @@ SECTIONS
     .rodata :
     {
         *(.rodata)
+        *(.user)
     }
 
     .data :

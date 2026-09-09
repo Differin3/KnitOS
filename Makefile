@@ -11,8 +11,14 @@ LDFLAGS = -m elf_i386 -T linker.ld -nostdlib
 
 BOOT_SRC = boot/boot.asm
 INTERRUPTS_SRC = boot/interrupts.asm
+USER_DEMO_SRC = boot/user_demo.asm
 SCHED_SWITCH_SRC = kernel/sched/switch.asm
 SCHED_TASK_SRC = kernel/sched/task.cpp
+ELF_SRC = kernel/elf.cpp
+USER_HELLO_SRC = user/hello.c
+USER_DEMO2_SRC = user/demo2.c
+USER_DEMO3_SRC = user/demo3.c
+USER_LINK = user/link.ld
 KERNEL_SRC = kernel/kernel.cpp
 IDT_SRC = kernel/idt.cpp
 KEYBOARD_SRC = kernel/drivers/input/keyboard.cpp
@@ -35,6 +41,8 @@ SYSCALL_SRC = kernel/syscall.cpp
 KERNEL_API_SRC = kernel/kernel_api.cpp
 PIC_SRC = kernel/drivers/pic/pic.cpp
 PIT_SRC = kernel/drivers/timer/pit.cpp
+ACPI_SRC = kernel/drivers/power/acpi.cpp
+RTC_SRC = kernel/drivers/power/rtc.cpp
 NIC_SRC = kernel/drivers/network/nic.cpp
 SKB_SRC = kernel/drivers/network/core/skb.cpp
 NETIF_SRC = kernel/drivers/network/core/netif.cpp
@@ -63,11 +71,12 @@ HTTP_GZIP_SRC = kernel/drivers/network/http_gzip.cpp
 SERIAL_LOG_SRC = kernel/serial_log.cpp
 HEAP_SRC = kernel/heap.cpp
 STRING_SRC = kernel/string.cpp
-KERNEL_OBJ = boot/boot.o boot/interrupts.o kernel/sched/switch.o kernel/sched/task.o \
-	kernel/kernel.o kernel/idt.o kernel/serial_log.o kernel/heap.o kernel/string.o \
-	kernel/mm/paging.o kernel/vga_autotest.o kernel/keyboard_autotest.o \
+KERNEL_OBJ = boot/boot.o boot/interrupts.o boot/user_demo.o kernel/sched/switch.o kernel/sched/task.o \
+	kernel/elf.o kernel/kernel.o kernel/idt.o kernel/serial_log.o kernel/heap.o kernel/string.o \
+	kernel/mm/paging.o kernel/vga_autotest.o kernel/keyboard_autotest.o kernel/user_autotest.o \
 	kernel/drivers/video/fb.o \
 	kernel/drivers/pic/pic.o kernel/drivers/timer/pit.o \
+	kernel/drivers/power/acpi.o kernel/drivers/power/rtc.o \
 	kernel/drivers/input/keyboard.o kernel/drivers/video/terminal.o \
 	kernel/drivers/storage/ata.o kernel/drivers/storage/ahci.o kernel/drivers/storage/nvme.o \
 	kernel/drivers/pci/pci.o kernel/fs.o kernel/fs_cache.o kernel/ramfs.o kernel/vfs.o kernel/fs_file.o kernel/fs_autotest.o kernel/utils.o kernel/utils/ls.o kernel/utils/find.o kernel/utils/nano.o \
@@ -103,13 +112,34 @@ boot/boot.o: $(BOOT_SRC)
 boot/interrupts.o: $(INTERRUPTS_SRC)
 	$(ASM) $(ASMFLAGS) -o boot/interrupts.o $(INTERRUPTS_SRC)
 
+user/hello.elf: $(USER_HELLO_SRC) user/syscall.h user/link.ld
+	$(CC) -m32 -ffreestanding -fno-pic -fno-pie -fno-stack-protector -fno-builtin -fno-asynchronous-unwind-tables \
+		-mno-red-zone -mno-mmx -mno-sse -mno-sse2 -nostdlib -Iuser -c -o user/hello.o $(USER_HELLO_SRC)
+	$(LD) -m elf_i386 -nostdlib -static -T user/link.ld -z noseparate-code -z max-page-size=0x1000 -o user/hello.elf user/hello.o
+
+user/demo2.elf: $(USER_DEMO2_SRC) user/syscall.h user/link.ld
+	$(CC) -m32 -ffreestanding -fno-pic -fno-pie -fno-stack-protector -fno-builtin -fno-asynchronous-unwind-tables \
+		-mno-red-zone -mno-mmx -mno-sse -mno-sse2 -nostdlib -Iuser -c -o user/demo2.o $(USER_DEMO2_SRC)
+	$(LD) -m elf_i386 -nostdlib -static -T user/link.ld -z noseparate-code -z max-page-size=0x1000 -o user/demo2.elf user/demo2.o
+
+user/demo3.elf: $(USER_DEMO3_SRC) user/syscall.h user/link.ld
+	$(CC) -m32 -ffreestanding -fno-pic -fno-pie -fno-stack-protector -fno-builtin -fno-asynchronous-unwind-tables \
+		-mno-red-zone -mno-mmx -mno-sse -mno-sse2 -nostdlib -Iuser -c -o user/demo3.o $(USER_DEMO3_SRC)
+	$(LD) -m elf_i386 -nostdlib -static -T user/link.ld -z noseparate-code -z max-page-size=0x1000 -o user/demo3.elf user/demo3.o
+
+boot/user_demo.o: $(USER_DEMO_SRC) user/hello.elf user/demo2.elf user/demo3.elf
+	$(ASM) $(ASMFLAGS) -i . -o boot/user_demo.o $(USER_DEMO_SRC)
+
+kernel/elf.o: $(ELF_SRC) kernel/elf.h kernel/serial_log.h
+	$(CC) $(CFLAGS) -c -o kernel/elf.o $(ELF_SRC)
+
 kernel/sched/switch.o: $(SCHED_SWITCH_SRC)
 	$(ASM) $(ASMFLAGS) -o kernel/sched/switch.o $(SCHED_SWITCH_SRC)
 
-kernel/sched/task.o: $(SCHED_TASK_SRC) kernel/sched/task.h kernel/heap.h kernel/serial_log.h
+kernel/sched/task.o: $(SCHED_TASK_SRC) kernel/sched/task.h kernel/heap.h kernel/serial_log.h kernel/elf.h kernel/mm/paging.h
 	$(CC) $(CFLAGS) -c -o kernel/sched/task.o $(SCHED_TASK_SRC)
 
-kernel/kernel.o: $(KERNEL_SRC) kernel/kernel.h
+kernel/kernel.o: $(KERNEL_SRC) kernel/kernel.h kernel/sched/task.h kernel/mm/paging.h
 	$(CC) $(CFLAGS) -c -o kernel/kernel.o $(KERNEL_SRC)
 
 kernel/idt.o: $(IDT_SRC) kernel/idt.h
@@ -133,6 +163,12 @@ kernel/drivers/pic/pic.o: $(PIC_SRC) kernel/drivers/pic/pic.h
 kernel/drivers/timer/pit.o: $(PIT_SRC) kernel/drivers/timer/pit.h kernel/drivers/pic/pic.h kernel/sched/task.h
 	$(CC) $(CFLAGS) -c -o kernel/drivers/timer/pit.o $(PIT_SRC)
 
+kernel/drivers/power/acpi.o: $(ACPI_SRC) kernel/drivers/power/acpi.h kernel/serial_log.h kernel/mm/paging.h
+	$(CC) $(CFLAGS) -c -o kernel/drivers/power/acpi.o $(ACPI_SRC)
+
+kernel/drivers/power/rtc.o: $(RTC_SRC) kernel/drivers/power/rtc.h kernel/serial_log.h
+	$(CC) $(CFLAGS) -c -o kernel/drivers/power/rtc.o $(RTC_SRC)
+
 kernel/drivers/input/keyboard.o: $(KEYBOARD_SRC) kernel/drivers/input/keyboard.h kernel/kernel.h kernel/drivers/pic/pic.h
 	$(CC) $(CFLAGS) -c -o kernel/drivers/input/keyboard.o $(KEYBOARD_SRC)
 
@@ -148,6 +184,9 @@ kernel/vga_autotest.o: kernel/vga_autotest.cpp kernel/vga_autotest.h kernel/driv
 kernel/keyboard_autotest.o: kernel/keyboard_autotest.cpp kernel/keyboard_autotest.h kernel/drivers/input/keyboard.h
 	$(CC) $(CFLAGS) -c -o kernel/keyboard_autotest.o kernel/keyboard_autotest.cpp
 
+kernel/user_autotest.o: kernel/user_autotest.cpp kernel/user_autotest.h kernel/sched/task.h kernel/mm/paging.h kernel/fs.h kernel/vfs.h kernel/ramfs.h
+	$(CC) $(CFLAGS) -c -o kernel/user_autotest.o kernel/user_autotest.cpp
+
 kernel/drivers/storage/ata.o: $(ATA_SRC) kernel/drivers/storage/ata.h
 	$(CC) $(CFLAGS) -c -o kernel/drivers/storage/ata.o $(ATA_SRC)
 
@@ -160,7 +199,7 @@ kernel/drivers/storage/nvme.o: $(NVME_SRC) kernel/drivers/storage/nvme.h kernel/
 kernel/drivers/pci/pci.o: $(PCI_SRC) kernel/drivers/pci/pci.h
 	$(CC) $(CFLAGS) -c -o kernel/drivers/pci/pci.o $(PCI_SRC)
 
-kernel/fs.o: $(FS_SRC) kernel/fs.h kernel/fs_cache.h kernel/drivers/storage/ata.h
+kernel/fs.o: $(FS_SRC) kernel/fs.h kernel/fs_cache.h kernel/drivers/storage/ata.h kernel/drivers/power/rtc.h
 	$(CC) $(CFLAGS) -c -o kernel/fs.o $(FS_SRC)
 
 kernel/fs_cache.o: kernel/fs_cache.cpp kernel/fs_cache.h kernel/fs.h kernel/drivers/storage/ata.h
@@ -202,7 +241,7 @@ kernel/dev.o: $(DEV_SRC) kernel/dev.h kernel/fs.h kernel/drivers/storage/disk_ma
 kernel/driver_manager.o: $(DRIVER_MANAGER_SRC) kernel/driver_manager.h kernel/drivers/pci/pci.h kernel/drivers/storage/ahci.h kernel/drivers/storage/nvme.h kernel/drivers/storage/ata.h kernel/drivers/input/keyboard.h kernel/drivers/video/terminal.h
 	$(CC) $(CFLAGS) -c -o kernel/driver_manager.o $(DRIVER_MANAGER_SRC)
 
-kernel/syscall.o: $(SYSCALL_SRC) kernel/syscall.h kernel/driver_manager.h kernel/fs.h
+kernel/syscall.o: $(SYSCALL_SRC) kernel/syscall.h kernel/driver_manager.h kernel/fs.h kernel/elf.h kernel/sched/task.h kernel/mm/paging.h kernel/drivers/video/terminal.h
 	$(CC) $(CFLAGS) -c -o kernel/syscall.o $(SYSCALL_SRC)
 
 kernel/kernel_api.o: $(KERNEL_API_SRC) kernel/kernel_api.h kernel/driver_manager.h
@@ -284,6 +323,6 @@ kernel/drivers/network/http_gzip.o: $(HTTP_GZIP_SRC) kernel/drivers/network/http
 	$(CC) $(CFLAGS) -c -o kernel/drivers/network/http_gzip.o $(HTTP_GZIP_SRC)
 
 clean:
-	rm -f $(KERNEL_OBJ) $(KERNEL_BIN) $(ISO)
+	rm -f $(KERNEL_OBJ) $(KERNEL_BIN) $(ISO) user/hello.o user/hello.elf user/demo2.o user/demo2.elf user/demo3.o user/demo3.elf
 
 .PHONY: all clean

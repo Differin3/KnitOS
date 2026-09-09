@@ -18,7 +18,7 @@ static bool use_fb = false;
 static bool status_enabled = true;
 static bool header_enabled = true;
 static char status_left[48];
-static char status_mid[64];
+static char status_mid[96];
 static char status_right[48];
 static char header_left[64];
 static char header_right[48];

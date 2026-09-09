@@ -1,7 +1,7 @@
 #include "ramfs.h"
 #include "mount.h"
 #include "serial_log.h"
-#include <string.h>
+#include "string.h"
 
 struct ram_node {
     bool used;

@@ -5,7 +5,7 @@
 #include "ramfs.h"
 #include "utils.h"
 #include "sched/task.h"
-#include <string.h>
+#include "string.h"
 
 struct open_file {
     bool used;

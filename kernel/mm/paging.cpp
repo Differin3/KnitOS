@@ -1,6 +1,7 @@
 #include "mm/paging.h"
 #include "serial_log.h"
 #include "idt.h"
+#include "sched/task.h"
 #include <stddef.h>
 
 #define PDE_PRESENT  0x001
@@ -116,6 +117,14 @@ void paging_load_cr3(uint32_t cr3) {
     asm volatile ("mov %0, %%cr3" : : "r"(cr3) : "memory");
 }
 
+void paging_set_user_esp0(uint32_t esp0) {
+    g_tss.esp0 = esp0;
+}
+
+void paging_setup_user_mode(void) {
+    gdt_install();
+}
+
 uint32_t paging_kernel_cr3(void) {
     return g_kernel_cr3;
 }
@@ -156,12 +165,29 @@ void paging_map_physical(uint32_t phys, uint32_t bytes) {
         uint32_t pde = addr >> 22;
         if (pde >= PAGE_DIR_ENTRIES) break;
         g_page_dir[pde] = addr | PDE_PRESENT | PDE_RW | PDE_PSE | PDE_USER;
+        /* В user-каталогах MMIO/FB — supervisor (без PDE_USER), чтобы ring3 не
+           могло дотянуться до видеопамяти и контроллеров напрямую. */
         for (int i = 0; i < PAGING_ASDIR_MAX; i++) {
             if (!g_asdir_used[i]) continue;
-            g_asdirs[i][pde] = g_page_dir[pde];
+            g_asdirs[i][pde] = addr | PDE_PRESENT | PDE_RW | PDE_PSE;
         }
     }
     asm volatile ("mov %0, %%cr3" : : "r"(g_kernel_cr3) : "memory");
+}
+
+void paging_mark_user_pde(uint32_t cr3, uint32_t pde_index) {
+    uint32_t* dir = paging_dir_ptr(cr3);
+    if (!dir || pde_index >= PAGE_DIR_ENTRIES) return;
+    dir[pde_index] |= PDE_USER;
+}
+
+static void paging_fill_supervisor(uint32_t* dir) {
+    for (int i = 0; i < PAGE_DIR_ENTRIES; i++) dir[i] = 0;
+    for (int i = 0; i < (IDENTITY_MB / 4); i++) {
+        uint32_t addr = (uint32_t)i * 0x400000u;
+        /* Без PDE_USER: ring3 не может читать/писать ядро, VGA и буферы. */
+        dir[i] = addr | PDE_PRESENT | PDE_RW | PDE_PSE;
+    }
 }
 
 uint32_t paging_create_identity_dir(void) {
@@ -169,10 +195,11 @@ uint32_t paging_create_identity_dir(void) {
     for (int i = 0; i < PAGING_ASDIR_MAX; i++) {
         if (g_asdir_used[i]) continue;
         g_asdir_used[i] = 1;
-        paging_fill_identity(g_asdirs[i], 0); /* full identity, including FAULT_PDE */
-        /* Copy high MMIO/FB mappings from kernel directory */
+        /* Пользовательский каталог: все страницы supervisor. Только сегменты
+           конкретной программы и её стек помечаются PDE_USER отдельно. */
+        paging_fill_supervisor(g_asdirs[i]);
         for (int p = (IDENTITY_MB / 4); p < PAGE_DIR_ENTRIES; p++) {
-            g_asdirs[i][p] = g_page_dir[p];
+            g_asdirs[i][p] = g_page_dir[p] & ~(uint32_t)PDE_USER;
         }
         return (uint32_t)&g_asdirs[i][0];
     }
@@ -217,7 +244,6 @@ int paging_pde_present(uint32_t cr3, uint32_t pde_index) {
 }
 
 extern "C" void page_fault_handler_main(uint32_t error_code) {
-    (void)error_code;
     uint32_t fault_addr;
     asm volatile ("mov %%cr2, %0" : "=r"(fault_addr));
     g_pf_count++;
@@ -227,9 +253,32 @@ extern "C" void page_fault_handler_main(uint32_t error_code) {
     uint32_t* dir = (uint32_t*)(cr3 & ~0xFFFu);
 
     uint32_t pde_i = fault_addr >> 22;
-    if (pde_i < PAGE_DIR_ENTRIES && !(dir[pde_i] & PDE_PRESENT)) {
+
+    /* Protection violation: PDE присутствует (P=1), но права не сошлись.
+       Из ring3 — нарушение страничной изоляции → убить задачу (не паниковать).
+       Из ring0 — баг ядра. */
+    if (error_code & 0x1u) {
+        struct task* cur = sched_current();
+        if ((error_code & 0x4u) && cur && cur->is_user) {
+            log_fmt3(LOG_ERR, "mm", "user fault killed",
+                     "addr", fault_addr, "err", error_code, "tid", (uint32_t)cur->id);
+            task_exit();
+        }
+        log_fmt3(LOG_ERR, "mm", "pf panic", "addr", fault_addr, "err", error_code, "n", g_pf_count);
+        while (1) asm volatile ("hlt");
+    }
+
+    if (pde_i >= PAGE_DIR_ENTRIES) {
+        log_fmt3(LOG_ERR, "mm", "pf panic", "addr", fault_addr, "err", error_code, "n", g_pf_count);
+        while (1) asm volatile ("hlt");
+    }
+    if (!(dir[pde_i] & PDE_PRESENT)) {
+        /* Demand paging: PDE ещё не размечена. Доступ USER даём только если отказ
+           пришёл из ring3; kernel-фолты остаются supervisor-страницами. */
+        uint32_t flags = PDE_PRESENT | PDE_RW | PDE_PSE;
+        if (error_code & 0x4u) flags |= PDE_USER;
         uint32_t addr = pde_i * 0x400000u;
-        dir[pde_i] = addr | PDE_PRESENT | PDE_RW | PDE_PSE | PDE_USER;
+        dir[pde_i] = addr | flags;
         asm volatile ("mov %0, %%cr3" : : "r"(cr3) : "memory");
         log_fmt3(LOG_INFO, "mm", "pf map", "addr", fault_addr, "pde", pde_i, "n", g_pf_count);
         return;

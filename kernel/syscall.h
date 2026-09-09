@@ -36,6 +36,13 @@
 #define SYS_GETDENTS    28
 #define SYS_MMAP_RO     29
 
+#define SYS_GETUID      30
+#define SYS_SETUID      31
+#define SYS_CHOWN       32
+#define SYS_GETCWD      33
+#define SYS_CHDIR       34
+#define SYS_SLEEP       35
+
 struct syscall_args {
     uint32_t arg0;
     uint32_t arg1;
@@ -44,7 +51,7 @@ struct syscall_args {
     uint32_t arg4;
 };
 
-extern "C" int syscall_handler(struct syscall_args* args);
+extern "C" int syscall_handler(struct syscall_args* args, uint32_t caller_cs);
 void syscall_init();
 
 #endif

@@ -1,6 +1,6 @@
 #include "mount.h"
 #include "drivers/storage/disk_manager.h"
-#include <string.h>
+#include "string.h"
 
 static struct mount_point mount_table[MAX_MOUNTS];
 static int mount_count = 0;

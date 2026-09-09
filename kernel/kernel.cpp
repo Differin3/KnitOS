@@ -34,11 +34,14 @@
 #include "drivers/network/protocols/route.h"
 #include "drivers/pic/pic.h"
 #include "drivers/timer/pit.h"
+#include "drivers/power/acpi.h"
+#include "drivers/power/rtc.h"
 #include "sched/task.h"
 #include "serial_log.h"
 #include "mm/paging.h"
 #include "vga_autotest.h"
 #include "keyboard_autotest.h"
+#include "user_autotest.h"
 #include "heap.h"
 #include <stddef.h>
 #include <stdint.h>
@@ -302,15 +305,40 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
     terminal_set_cursor(current_row, 0);
     print_status("OK", "PIT 100Hz", vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK));
     current_row++;
+
+    rtc_init();
+    char rtc_boot_msg[21];
+    rtc_format_timestamp(rtc_boot_msg, sizeof(rtc_boot_msg));
+    terminal_set_cursor(current_row, 0);
+    if (rtc_valid()) {
+        print_status("OK", rtc_boot_msg, vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK));
+    } else {
+        print_status("WARN", "RTC time unavailable", vga_entry_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK));
+    }
+    current_row++;
     
     terminal_set_cursor(current_row, 0);
     syscall_init();
     print_status("OK", "Syscalls", vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK));
     current_row++;
+
+    paging_setup_user_mode();
+    terminal_set_cursor(current_row, 0);
+    print_status("OK", "User mode (ring3) + ELF", vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK));
+    current_row++;
     
     driver_scan_devices();
     
     disk_manager_init();
+    
+    bool acpi_ok = acpi_init();
+    terminal_set_cursor(current_row, 0);
+    if (acpi_ok) {
+        print_status("OK", "ACPI S5 + reset", vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK));
+    } else {
+        print_status("WARN", "ACPI not found (fallback ports)", vga_entry_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK));
+    }
+    current_row++;
     
     // Начинаем вывод статусов сразу под последней строкой отладочного вывода
     current_row = (int)terminal_get_row();
@@ -580,11 +608,15 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
     size_t prompt_col = 0;
 
     auto refresh_status_line = [&]() {
-        char mid[64];
+        char mid[96];
         size_t m = 0;
         auto mput = [&](const char* s) {
             while (*s && m + 1 < sizeof(mid)) mid[m++] = *s++;
         };
+        char ts[24];
+        rtc_format_timestamp(ts, sizeof(ts));
+        mput(rtc_valid() ? ts : "--");
+        mput(" | ");
         const char* cwd = utils_get_current_directory();
         mput(cwd ? cwd : "/");
         mput(" | ");
@@ -703,6 +735,9 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
         terminal_writestring("\nRebooting...");
         // Ожидание готовности контроллера
         for (volatile int i = 0; i < 10000; i++);
+        // Сначала ACPI Reset register (если есть)
+        acpi_reboot();
+        for (volatile int i = 0; i < 10000; i++);
         while ((inb(0x64) & 0x02) != 0) {}
         outb(0x64, 0xFE); // Reset через keyboard controller
         // Если не сработало, пробуем через порт 0xCF9
@@ -720,7 +755,10 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
             return;
         }
         terminal_writestring("\nShutting down...");
+        // ACPI S5 (из FADT/DSDT)
+        acpi_power_off();
         // QEMU/VirtualBox shutdown через порт 0x604 (16-bit)
+        for (volatile int i = 0; i < 10000; i++);
         outw(0x604, 0x2000);
         // ACPI shutdown (если поддерживается)
         for (volatile int i = 0; i < 10000; i++);
@@ -780,7 +818,9 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
             terminal_writestring("\n  chmod <mode> <path>   chown <uid> <path>   touch <path>");
             terminal_writestring("\n  df   du <path>   sync   mount   fsck");
             terminal_writestring("\nSystem:");
-            terminal_writestring("\n  clear   echo   version   disk   reboot   shutdown");
+            terminal_writestring("\n  clear   echo   version   date   setdate YYYY-MM-DD   settime HH:MM:SS");
+            terminal_writestring("\n  runelf hello   disk   reboot   shutdown  poweroff");
+            terminal_writestring("\n  acpi                  show ACPI tables info (S5, reset)");
             terminal_writestring("\n  ps                     tasks (systemd=0, idle, ...)");
             terminal_writestring("\n  kill [-9] <pid>         terminate kthread (not systemd/idle)");
             terminal_writestring("\n  resolution <H>   log [off|err|info|debug]");
@@ -794,6 +834,7 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
             terminal_writestring("\n  httpserver [port] [max]  HTTP/1.1 server (/www, Keep-Alive)");
             terminal_writestring("\n  autotest fs             FS create/write/read/delete test");
             terminal_writestring("\n  autotest vga            VGA/FB console smoke test");
+            terminal_writestring("\n  autotest user           ring3 isolation + uid + demos");
             terminal_writestring("\n  autotest network [port] [max]  CI network + FS + HTTP");
             terminal_writestring("\nKeyboard:");
             terminal_writestring("\n  Tab          autocomplete (2x=list, 3x=cycle)");
@@ -1453,6 +1494,133 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
             terminal_writestring(")");
             flush_line(); return;
         }
+        if (len==4 && cmd[0]=='d'&&cmd[1]=='a'&&cmd[2]=='t'&&cmd[3]=='e') {
+            char dtbuf[21];
+            rtc_format_timestamp(dtbuf, sizeof(dtbuf));
+            terminal_writestring("\n");
+            if (rtc_valid()) {
+                terminal_writestring(dtbuf);
+            } else {
+                terminal_writestring("RTC time unavailable");
+            }
+            terminal_writestring("\nUsage: setdate YYYY-MM-DD | settime HH:MM:SS");
+            flush_line(); return;
+        }
+        /* Установка даты/времени RTC (CMOS). */
+        if (cmd_name_len==7 && cmd_name[0]=='s'&&cmd_name[1]=='e'&&cmd_name[2]=='t'&&
+            cmd_name[3]=='d'&&cmd_name[4]=='a'&&cmd_name[5]=='t'&&cmd_name[6]=='e') {
+            if (argc < 2) {
+                terminal_writestring("\nUsage: setdate YYYY-MM-DD");
+                flush_line(); return;
+            }
+            const char* a = argv[1];
+            int n;
+            int y = 0, mo = 0, d = 0;
+            n = 0;
+            while (*a >= '0' && *a <= '9' && n < 4) { y = y * 10 + (*a - '0'); a++; n++; }
+            if (n != 4 || *a != '-') { terminal_writestring("\nsetdate: bad format (YYYY-MM-DD)"); flush_line(); return; }
+            a++;
+            n = 0;
+            while (*a >= '0' && *a <= '9' && n < 2) { mo = mo * 10 + (*a - '0'); a++; n++; }
+            if (n != 2 || *a != '-') { terminal_writestring("\nsetdate: bad format (YYYY-MM-DD)"); flush_line(); return; }
+            a++;
+            n = 0;
+            while (*a >= '0' && *a <= '9' && n < 2) { d = d * 10 + (*a - '0'); a++; n++; }
+            if (n != 2 || *a != 0) { terminal_writestring("\nsetdate: bad format (YYYY-MM-DD)"); flush_line(); return; }
+            struct rtc_time t = rtc_read();
+            t.year = (uint16_t)y;
+            t.month = (uint8_t)mo;
+            t.day = (uint8_t)d;
+            if (!rtc_write(t)) {
+                terminal_writestring("\nsetdate: invalid value");
+            } else {
+                terminal_writestring("\nDate set to ");
+                char dbuf[11];
+                rtc_format_date(dbuf, sizeof(dbuf));
+                terminal_writestring(dbuf);
+            }
+            refresh_status_line();
+            flush_line(); return;
+        }
+        if (cmd_name_len==7 && cmd_name[0]=='s'&&cmd_name[1]=='e'&&cmd_name[2]=='t'&&
+            cmd_name[3]=='t'&&cmd_name[4]=='i'&&cmd_name[5]=='m'&&cmd_name[6]=='e') {
+            if (argc < 2) {
+                terminal_writestring("\nUsage: settime HH:MM:SS");
+                flush_line(); return;
+            }
+            const char* a = argv[1];
+            int n;
+            int h = 0, mi = 0, s = 0;
+            n = 0;
+            while (*a >= '0' && *a <= '9' && n < 2) { h = h * 10 + (*a - '0'); a++; n++; }
+            if (n != 2 || *a != ':') { terminal_writestring("\nsettime: bad format (HH:MM:SS)"); flush_line(); return; }
+            a++;
+            n = 0;
+            while (*a >= '0' && *a <= '9' && n < 2) { mi = mi * 10 + (*a - '0'); a++; n++; }
+            if (n != 2 || *a != ':') { terminal_writestring("\nsettime: bad format (HH:MM:SS)"); flush_line(); return; }
+            a++;
+            n = 0;
+            while (*a >= '0' && *a <= '9' && n < 2) { s = s * 10 + (*a - '0'); a++; n++; }
+            if (n != 2 || *a != 0) { terminal_writestring("\nsettime: bad format (HH:MM:SS)"); flush_line(); return; }
+            struct rtc_time t = rtc_read();
+            t.hour = (uint8_t)h;
+            t.minute = (uint8_t)mi;
+            t.second = (uint8_t)s;
+            if (!rtc_write(t)) {
+                terminal_writestring("\nsettime: invalid value");
+            } else {
+                terminal_writestring("\nTime set to ");
+                char tbuf[9];
+                rtc_format_time(tbuf, sizeof(tbuf));
+                terminal_writestring(tbuf);
+            }
+            refresh_status_line();
+            flush_line(); return;
+        }
+        if (len >= 12 && cmd[0]=='r'&&cmd[1]=='u'&&cmd[2]=='n'&&cmd[3]=='e'&&cmd[4]=='l'&&cmd[5]=='f'&&cmd[6]==' ') {
+            extern char user_demo_start[], user_demo_end[];
+            extern char user_demo2_start[], user_demo2_end[];
+            extern char user_demo3_start[], user_demo3_end[];
+            const char* arg = cmd + 7;
+            const char* which = 0;
+            char* start = 0;
+            char* end = 0;
+            const char* name = "hello";
+            size_t alen = len - 7;
+            if (alen >= 5 && arg[0]=='h'&&arg[1]=='e'&&arg[2]=='l'&&arg[3]=='l'&&arg[4]=='o') {
+                which = "hello";
+                start = user_demo_start; end = user_demo_end; name = "hello";
+            } else if (alen >= 5 && arg[0]=='d'&&arg[1]=='e'&&arg[2]=='m'&&arg[3]=='o'&&arg[4]=='2') {
+                which = "demo2";
+                start = user_demo2_start; end = user_demo2_end; name = "demo2";
+            } else if (alen >= 5 && arg[0]=='d'&&arg[1]=='e'&&arg[2]=='m'&&arg[3]=='o'&&arg[4]=='3') {
+                which = "demo3";
+                start = user_demo3_start; end = user_demo3_end; name = "demo3";
+            }
+            if (!which) {
+                terminal_writestring("\nUsage: runelf hello|demo2|demo3");
+                flush_line(); return;
+            }
+            size_t sz = (size_t)(end - start);
+            if (sz == 0) {
+                terminal_writestring("\nNo embedded user program");
+                flush_line(); return;
+            }
+            int tid = task_spawn_user((const uint8_t*)start, sz, name);
+            terminal_writestring("\nSpawned user task");
+            if (tid >= 0) {
+                char tbuf[12]; int tp = 0;
+                uint32_t t = (uint32_t)tid;
+                if (t == 0) { tbuf[tp++] = '0'; }
+                else { char tmp[12]; int tt = 0; while (t > 0 && tt < 11) { tmp[tt++] = (char)('0' + (t % 10)); t /= 10; } while (tt > 0) tbuf[tp++] = tmp[--tt]; }
+                tbuf[tp] = 0;
+                terminal_writestring(" tid=");
+                terminal_writestring(tbuf);
+            } else {
+                terminal_writestring(" (failed)");
+            }
+            flush_line(); return;
+        }
         if (len==3 && cmd[0]=='i'&&cmd[1]=='r'&&cmd[2]=='q') {
             terminal_writestring("\nIRQ keyboard hits: ");
             uint32_t n = keyboard_irq_count();
@@ -1472,6 +1640,36 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
         }
         if (len==8 && cmd[0]=='s'&&cmd[1]=='h'&&cmd[2]=='u'&&cmd[3]=='t'&&cmd[4]=='d'&&cmd[5]=='o'&&cmd[6]=='w'&&cmd[7]=='n') {
             shutdown(); return;
+        }
+        if (len==8 && cmd[0]=='p'&&cmd[1]=='o'&&cmd[2]=='w'&&cmd[3]=='e'&&cmd[4]=='r'&&cmd[5]=='o'&&cmd[6]=='f'&&cmd[7]=='f') {
+            shutdown(); return;
+        }
+        if (len==4 && cmd[0]=='a'&&cmd[1]=='c'&&cmd[2]=='p'&&cmd[3]=='i') {
+            terminal_writestring("\nACPI: ");
+            if (!acpi_available()) {
+                terminal_writestring("not available");
+            } else {
+                terminal_writestring("available");
+            }
+            terminal_writestring("\n  Power off (S5): ");
+            if (acpi_pm1_supported()) {
+                terminal_writestring("PM1a_CNT_BLK=0x");
+                shell_write_u32(acpi_pm1a_cnt_blk());
+                terminal_writestring(" SLP_TYPa=");
+                shell_write_u32(acpi_s5_slp_typa());
+            } else {
+                terminal_writestring("no");
+            }
+            terminal_writestring("\n  Reset register: ");
+            if (acpi_reset_supported()) {
+                terminal_writestring(acpi_reset_is_memory() ? "mem 0x" : "io 0x");
+                shell_write_u32(acpi_reset_address());
+                terminal_writestring(" value=");
+                shell_write_u32(acpi_reset_value());
+            } else {
+                terminal_writestring("no");
+            }
+            flush_line(); return;
         }
         const char pref_res[]="resolution ";
         if (len >= 12) {
@@ -2157,6 +2355,18 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
             flush_line(); return;
         }
 
+        // autotest user — ring3 процессы, страничная изоляция, uid, user buffer
+        if (len >= 13 && cmd[0]=='a'&&cmd[1]=='u'&&cmd[2]=='t'&&cmd[3]=='o'&&
+            cmd[4]=='t'&&cmd[5]=='e'&&cmd[6]=='s'&&cmd[7]=='t'&&cmd[8]==' '&&
+            cmd[9]=='u'&&cmd[10]=='s'&&cmd[11]=='e'&&cmd[12]=='r' &&
+            (len == 13 || cmd[13] == ' ' || cmd[13] == 0)) {
+            if (user_autotest_run() != 0) {
+                terminal_writestring("\n[AUTOTEST] user failed");
+                log_msg(LOG_ERR, "autotest", "user_failed");
+            }
+            flush_line(); return;
+        }
+
         // autotest network [port] [max] — CI: fs, dhcp, /www, HTTP server (markers on serial)
         if (len >= 16 && cmd[0]=='a'&&cmd[1]=='u'&&cmd[2]=='t'&&cmd[3]=='o'&&
             cmd[4]=='t'&&cmd[5]=='e'&&cmd[6]=='s'&&cmd[7]=='t'&&cmd[8]==' '&&
@@ -2251,6 +2461,19 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
             }
             terminal_writestring("\n[AUTOTEST] sched ok");
             log_msg(LOG_INFO, "autotest", "sched_ok");
+
+            terminal_writestring("\n[AUTOTEST] user...");
+            int user_rc = user_autotest_run();
+            if (user_rc != 0) {
+                terminal_writestring("\n[AUTOTEST] user failed rc=");
+                shell_write_u32((uint32_t)(user_rc < 0 ? (uint32_t)(-user_rc) : (uint32_t)user_rc));
+                log_fmt3(LOG_ERR, "autotest", "user_failed", "rc",
+                         (uint32_t)(user_rc < 0 ? (uint32_t)(-user_rc) : (uint32_t)user_rc),
+                         "ok", 0u, "x", 0u);
+                flush_line(); return;
+            }
+            terminal_writestring("\n[AUTOTEST] user ok");
+            log_msg(LOG_INFO, "autotest", "user_ok");
             /* sleep_ok is logged inside sched_autotest on success */
 
             http_server_init();
@@ -2816,8 +3039,8 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
     };
 
     static const char* shell_commands[] = {
-        "help", "ls", "find", "cd", "pwd", "clear", "echo", "version", "disk", "ps", "kill",
-        "cat", "nano", "write", "rm", "reboot", "shutdown", "resolution", "test",
+        "help", "ls", "find", "cd", "pwd", "clear", "echo", "version", "date", "setdate", "settime", "runelf", "disk", "ps", "kill",
+        "cat", "nano", "write", "rm", "reboot", "shutdown", "poweroff", "acpi", "resolution", "test",
         "network", "dhcp", "ip", "udp", "tcp", "udplisten", "ping", "httpget", "httpserver", "dns", "arp", "netstat", "ports", "port", "route", "socktest", "log", "autotest", 0
     };
     static const char* network_subcommands[] = { "static", "save", "reload", 0 };
@@ -3221,6 +3444,7 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
 
     // Главный цикл: softirq net_process + TCP/DHCP на PIT time
     uint32_t last_timer_ms = timer_ms();
+    uint32_t last_status_ms = last_timer_ms;
     while (1) {
         nic_process_packets();
 
@@ -3229,6 +3453,12 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
             tcp_process_timers();
             dhcp_poll();
             last_timer_ms = now_ms;
+        }
+
+        /* Живые часы в строке статуса (~1 раз в секунду). */
+        if (now_ms - last_status_ms >= 1000) {
+            last_status_ms = now_ms;
+            if (!terminal_in_scrollback()) refresh_status_line();
         }
         
         /* Drain several keys per tick so IRQ buffer does not overflow under yield/FB. */

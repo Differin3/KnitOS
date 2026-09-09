@@ -46,8 +46,10 @@ void idt_init() {
     // #PF vector 14
     idt_set_gate(14, (uint32_t)page_fault_handler, kernel_cs, 0x8E);
 
-    // Syscall int 0x80 — DPL=3
-    idt_set_gate(0x80, (uint32_t)syscall_handler_asm, kernel_cs, 0xEE);
+    // Syscall int 0x80 — DPL=3, trap gate (IF сохраняется): блокирующие
+    // syscall'ы (sleep/yield) переключают задачи, и унаследованный IF у
+    // resumed-потока обязан быть 1 (иначе его hlt никогда не проснётся).
+    idt_set_gate(0x80, (uint32_t)syscall_handler_asm, kernel_cs, 0xEF);
 
     idt_load((uint32_t)&idtp);
 }

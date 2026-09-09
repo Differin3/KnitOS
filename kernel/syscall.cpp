@@ -4,51 +4,166 @@
 #include "fs_file.h"
 #include "vfs.h"
 #include "heap.h"
+#include "elf.h"
 #include "drivers/network/socket.h"
+#include "drivers/video/terminal.h"
+#include "drivers/input/keyboard.h"
 #include "sched/task.h"
 #include "mm/paging.h"
 #include <stddef.h>
 
 extern "C" void syscall_handler_asm();
 
-extern "C" int syscall_handler(struct syscall_args* args) {
+/*
+ * Копирование между адресным пространством задачи и ядром.
+ * Пока адресное пространство identity-смежное, поэтому безопасность
+ * сводится к диапазонной проверке: указатели должны лежать в
+ * пользовательском регионе [ELF_USER_VA_MIN, ELF_USER_VA_MAX).
+ * Вызовы из ring0 (caller_cs != 0x1B) работают с ядерными указателями.
+ */
+#define USER_CS 0x1B
+
+#define SYS_BUF_CAP 65536u
+
+static bool user_range_ok(uint32_t addr, uint32_t n, uint32_t max) {
+    return addr >= ELF_USER_VA_MIN && addr < max && n <= max - addr;
+}
+
+static int user_copy_in(void* dst, const void* src, uint32_t n, uint32_t caller_cs, uint32_t usermax) {
+    if (!dst || n == 0) return 0;
+    if (caller_cs == USER_CS) {
+        if (!user_range_ok((uint32_t)src, n, usermax)) return -1;
+    }
+    const uint8_t* s = (const uint8_t*)src;
+    uint8_t* d = (uint8_t*)dst;
+    for (uint32_t i = 0; i < n; i++) d[i] = s[i];
+    return 0;
+}
+
+static int user_copy_out(void* dst, const void* src, uint32_t n, uint32_t caller_cs, uint32_t usermax) {
+    if (!dst || n == 0) return 0;
+    if (caller_cs == USER_CS) {
+        if (!user_range_ok((uint32_t)dst, n, usermax)) return -1;
+    }
+    const uint8_t* s = (const uint8_t*)src;
+    uint8_t* d = (uint8_t*)dst;
+    for (uint32_t i = 0; i < n; i++) d[i] = s[i];
+    return 0;
+}
+
+/* Копия NUL-terminated строки из задачи (до cap-1 байт). 0 = ok. */
+static int user_str_copy(char* dst, size_t cap, const char* src, uint32_t caller_cs, uint32_t usermax) {
+    if (!dst || cap == 0) return -1;
+    if (!src) return -1;
+    uint32_t a = (uint32_t)src;
+    if (caller_cs == USER_CS && a < ELF_USER_VA_MIN) return -1;
+    uint32_t i = 0;
+    for (; i + 1 < cap; i++) {
+        uint32_t va = a + i;
+        if (caller_cs == USER_CS && (va < ELF_USER_VA_MIN || va >= usermax)) return -1;
+        char c = *((const char*)va);
+        dst[i] = c;
+        if (c == 0) return 0;
+    }
+    dst[i] = 0;
+    return 0;
+}
+
+/* Первые три fd = консоль (терминал + зеркало в serial). */
+static int console_write(const char* buf, uint32_t n) {
+    for (uint32_t i = 0; i < n; i++) terminal_putchar(buf[i]);
+    return (int)n;
+}
+
+/* Ядро-буфер под пользовательский буфер: стек для малых размеров, heap для больших. */
+static void* sys_buf_alloc(uint32_t n, void* stackbuf, uint32_t stacksz, int* heap_used) {
+    if (n <= stacksz) return stackbuf;
+    void* p = malloc(n);
+    if (p) *heap_used = 1;
+    return p;
+}
+
+extern "C" int syscall_handler(struct syscall_args* args, uint32_t caller_cs) {
     if (!args) return -1;
 
+    uint32_t usermax = ELF_USER_VA_MAX;
     uint32_t syscall_num = args->arg0;
 
     switch (syscall_num) {
         case SYS_READ: {
-            /* Prefer task file fd when arg1 looks like a small fd */
             int fd = (int)args->arg1;
+            char* ubuf = (char*)args->arg2;
+            size_t ulen = (size_t)args->arg3;
+            if (ulen > SYS_BUF_CAP) return -1;
             uint8_t ty = 0;
             int handle = -1;
             if (fd >= 0 && fd < TASK_FD_MAX && task_fd_get(fd, &ty, &handle) == 0 &&
                 ty == TASK_FD_FILE) {
-                return vfs_fread(fd, (void*)args->arg2, (size_t)args->arg3);
+                char kb[512];
+                int heap_used = 0;
+                void* kbuf = sys_buf_alloc((uint32_t)ulen, kb, sizeof(kb), &heap_used);
+                if (!kbuf) return -1;
+                int n = vfs_fread(fd, kbuf, ulen);
+                if (n > 0 && user_copy_out(ubuf, kbuf, (uint32_t)n, caller_cs, usermax) != 0) {
+                    if (heap_used) free(kbuf);
+                    return -1;
+                }
+                if (heap_used) free(kbuf);
+                return n;
             }
-            return driver_read(args->arg1, (void*)args->arg2, (size_t)args->arg3, args->arg4);
+            /* Не занятое файлом fd 0-2 — консоль (stdin: клавиатура). */
+            if (fd >= 0 && fd <= 2) {
+                char kb[128];
+                uint32_t n = ulen < sizeof(kb) ? (uint32_t)ulen : (uint32_t)sizeof(kb);
+                uint32_t i = 0;
+                for (; i < n; i++) {
+                    char c = keyboard_getchar();
+                    if (c == 0) break;
+                    kb[i] = c;
+                }
+                if (i && user_copy_out(ubuf, kb, i, caller_cs, usermax) != 0) return -1;
+                return (int)i;
+            }
+            return driver_read(args->arg1, ubuf, ulen, args->arg4);
         }
 
         case SYS_WRITE: {
             int fd = (int)args->arg1;
+            const void* ubuf = (const void*)args->arg2;
+            size_t ulen = (size_t)args->arg3;
+            if (ulen > SYS_BUF_CAP) return -1;
+            char kb[512];
+            int heap_used = 0;
+            void* kbuf = sys_buf_alloc((uint32_t)ulen, kb, sizeof(kb), &heap_used);
+            if (!kbuf) return -1;
+            if (user_copy_in(kbuf, ubuf, (uint32_t)ulen, caller_cs, usermax) != 0) {
+                if (heap_used) free(kbuf);
+                return -1;
+            }
+            int res;
             uint8_t ty = 0;
             int handle = -1;
             if (fd >= 0 && fd < TASK_FD_MAX && task_fd_get(fd, &ty, &handle) == 0 &&
                 ty == TASK_FD_FILE) {
-                return vfs_fwrite(fd, (const void*)args->arg2, (size_t)args->arg3);
+                res = vfs_fwrite(fd, kbuf, ulen);
+            } else if (fd >= 0 && fd <= 2) {
+                res = console_write((const char*)kbuf, (uint32_t)ulen);
+            } else {
+                res = driver_write(args->arg1, kbuf, ulen, args->arg4);
             }
-            return driver_write(args->arg1, (const void*)args->arg2, (size_t)args->arg3,
-                                args->arg4);
+            if (heap_used) free(kbuf);
+            return res;
         }
 
         case SYS_OPEN: {
-            const char* filename = (const char*)args->arg1;
+            char path[256];
+            if (user_str_copy(path, sizeof(path), (const char*)args->arg1, caller_cs, usermax) != 0)
+                return -1;
             int flags = (int)args->arg2;
             if (!flags) flags = O_RDWR;
             uint16_t mode = (uint16_t)args->arg3;
             if (!mode) mode = FS_MODE_FILE;
-            if (!filename) return -1;
-            return vfs_open(filename, flags, mode);
+            return vfs_open(path, flags, mode);
         }
 
         case SYS_CLOSE:
@@ -59,34 +174,80 @@ extern "C" int syscall_handler(struct syscall_args* args) {
 
         case SYS_STAT: {
             struct fs_stat st;
-            if (fs_stat((const char*)args->arg1, &st) != 0) return -1;
-            if (args->arg2) *(struct fs_stat*)args->arg2 = st;
+            char path[256];
+            if (user_str_copy(path, sizeof(path), (const char*)args->arg1, caller_cs, usermax) != 0)
+                return -1;
+            if (fs_stat(path, &st) != 0) return -1;
+            if (args->arg2) {
+                if (user_copy_out((void*)args->arg2, &st, sizeof(st), caller_cs, usermax) != 0)
+                    return -1;
+            }
             return 0;
         }
 
-        case SYS_FSTAT:
-            return vfs_fstat((int)args->arg1, (struct fs_stat*)args->arg2);
+        case SYS_FSTAT: {
+            struct fs_stat st;
+            int r = vfs_fstat((int)args->arg1, &st);
+            if (r != 0) return r;
+            if (args->arg2) {
+                if (user_copy_out((void*)args->arg2, &st, sizeof(st), caller_cs, usermax) != 0)
+                    return -1;
+            }
+            return 0;
+        }
 
         case SYS_DUP:
             return vfs_dup((int)args->arg1);
         case SYS_FSYNC:
             return vfs_fsync((int)args->arg1);
-        case SYS_LINK:
-            return fs_link((const char*)args->arg1, (const char*)args->arg2);
-        case SYS_UNLINK:
-            return vfs_unlink((const char*)args->arg1);
-        case SYS_CHMOD:
-            return fs_chmod((const char*)args->arg1, (uint16_t)args->arg2);
+        case SYS_LINK: {
+            char a[256], b[256];
+            if (user_str_copy(a, sizeof(a), (const char*)args->arg1, caller_cs, usermax) != 0) return -1;
+            if (user_str_copy(b, sizeof(b), (const char*)args->arg2, caller_cs, usermax) != 0) return -1;
+            return fs_link(a, b);
+        }
+        case SYS_UNLINK: {
+            char path[256];
+            if (user_str_copy(path, sizeof(path), (const char*)args->arg1, caller_cs, usermax) != 0)
+                return -1;
+            return vfs_unlink(path);
+        }
+        case SYS_CHMOD: {
+            char path[256];
+            if (user_str_copy(path, sizeof(path), (const char*)args->arg1, caller_cs, usermax) != 0)
+                return -1;
+            return fs_chmod(path, (uint16_t)args->arg2);
+        }
+        case SYS_CHOWN: {
+            char path[256];
+            if (user_str_copy(path, sizeof(path), (const char*)args->arg1, caller_cs, usermax) != 0)
+                return -1;
+            return fs_chown(path, (uint16_t)args->arg2, (uint16_t)args->arg3);
+        }
         case SYS_SYNC:
             return fs_sync();
-        case SYS_OPENAT:
-            return vfs_openat((int)args->arg1, (const char*)args->arg2, (int)args->arg3,
-                              (uint16_t)args->arg4);
-        case SYS_GETDENTS:
-            return vfs_getdents((int)args->arg1, (char*)args->arg2, (size_t)args->arg3);
+        case SYS_OPENAT: {
+            char path[256];
+            if (user_str_copy(path, sizeof(path), (const char*)args->arg2, caller_cs, usermax) != 0)
+                return -1;
+            return vfs_openat((int)args->arg1, path, (int)args->arg3, (uint16_t)args->arg4);
+        }
+        case SYS_GETDENTS: {
+            char kbuf[256];
+            size_t ulen = (size_t)args->arg3;
+            if (ulen > sizeof(kbuf)) ulen = sizeof(kbuf);
+            int n = vfs_getdents((int)args->arg1, kbuf, ulen);
+            if (n > 0) {
+                if (user_copy_out((char*)args->arg2, kbuf, (uint32_t)n, caller_cs, usermax) != 0)
+                    return -1;
+            }
+            return n;
+        }
         case SYS_MMAP_RO: {
             /* Simplified read-only file map: load into kernel buffer, return pointer */
-            const char* path = (const char*)args->arg1;
+            char path[256];
+            if (user_str_copy(path, sizeof(path), (const char*)args->arg1, caller_cs, usermax) != 0)
+                return -1;
             uint32_t* out_addr = (uint32_t*)args->arg2;
             uint32_t* out_size = (uint32_t*)args->arg3;
             uint32_t sz = 0;
@@ -97,23 +258,42 @@ extern "C" int syscall_handler(struct syscall_args* args) {
                 free(mem);
                 return -1;
             }
-            if (out_addr) *out_addr = (uint32_t)mem;
-            if (out_size) *out_size = sz;
+            if (args->arg2) {
+                if (user_copy_out(out_addr, &mem, sizeof(uint32_t), caller_cs, usermax) != 0) {
+                    free(mem); return -1;
+                }
+            }
+            if (args->arg3) {
+                if (user_copy_out(out_size, &sz, sizeof(uint32_t), caller_cs, usermax) != 0) {
+                    free(mem); return -1;
+                }
+            }
             return 0;
         }
 
         case SYS_IOCTL:
             return driver_ioctl(args->arg1, args->arg2, (void*)args->arg3);
 
-        case SYS_DEVICE_LIST:
-            return driver_list_by_type((enum driver_type)args->arg1, (struct driver*)args->arg2,
-                                      (int)args->arg3);
+        case SYS_DEVICE_LIST: {
+            struct driver tmp[16];
+            int max = (int)args->arg3;
+            if (max <= 0) return 0;
+            if (max > 16) max = 16;
+            int n = driver_list_by_type((enum driver_type)args->arg1, tmp, max);
+            if (n > 0) {
+                if (user_copy_out((void*)args->arg2, tmp, (uint32_t)n * sizeof(struct driver),
+                                 caller_cs, usermax) != 0)
+                    return -1;
+            }
+            return n;
+        }
 
         case SYS_DEVICE_INFO: {
             struct driver* drv = driver_find_by_id(args->arg1);
             struct driver* info = (struct driver*)args->arg2;
             if (drv && info) {
-                *info = *drv;
+                if (user_copy_out(info, drv, sizeof(struct driver), caller_cs, usermax) != 0)
+                    return -1;
                 return 0;
             }
             return -1;
@@ -124,22 +304,77 @@ extern "C" int syscall_handler(struct syscall_args* args) {
             if (s >= 0) task_fd_alloc(TASK_FD_SOCK, s, 0);
             return s;
         }
-        case SYS_BIND:
-            return socket_bind((int)args->arg1, (const struct sockaddr_in*)args->arg2);
+        case SYS_BIND: {
+            struct sockaddr_in addr;
+            if (user_copy_in(&addr, (const void*)args->arg2, sizeof(addr), caller_cs, usermax) != 0)
+                return -1;
+            return socket_bind((int)args->arg1, &addr);
+        }
         case SYS_LISTEN:
             return socket_listen((int)args->arg1, (int)args->arg2);
         case SYS_ACCEPT:
             return socket_accept((int)args->arg1, (int)args->arg2);
-        case SYS_CONNECT:
-            return socket_connect((int)args->arg1, (const struct sockaddr_in*)args->arg2,
-                                  (int)args->arg3);
-        case SYS_SEND:
-            return socket_send((int)args->arg1, (const void*)args->arg2, (size_t)args->arg3);
-        case SYS_RECV:
-            return socket_recv((int)args->arg1, (void*)args->arg2, (size_t)args->arg3,
-                               (int)args->arg4);
+        case SYS_CONNECT: {
+            struct sockaddr_in addr;
+            if (user_copy_in(&addr, (const void*)args->arg2, sizeof(addr), caller_cs, usermax) != 0)
+                return -1;
+            return socket_connect((int)args->arg1, &addr, (int)args->arg3);
+        }
+        case SYS_SEND: {
+            size_t ulen = (size_t)args->arg3;
+            if (ulen > SYS_BUF_CAP) return -1;
+            char kb[512];
+            int heap_used = 0;
+            void* kbuf = sys_buf_alloc((uint32_t)ulen, kb, sizeof(kb), &heap_used);
+            if (!kbuf) return -1;
+            if (user_copy_in(kbuf, (const void*)args->arg2, (uint32_t)ulen, caller_cs, usermax) != 0) {
+                if (heap_used) free(kbuf);
+                return -1;
+            }
+            int res = socket_send((int)args->arg1, kbuf, ulen);
+            if (heap_used) free(kbuf);
+            return res;
+        }
+        case SYS_RECV: {
+            size_t ulen = (size_t)args->arg3;
+            if (ulen > SYS_BUF_CAP) return -1;
+            char kb[512];
+            int heap_used = 0;
+            void* kbuf = sys_buf_alloc((uint32_t)ulen, kb, sizeof(kb), &heap_used);
+            if (!kbuf) return -1;
+            int res = socket_recv((int)args->arg1, kbuf, ulen, (int)args->arg4);
+            if (res > 0 && user_copy_out((void*)args->arg2, kbuf, (uint32_t)res, caller_cs, usermax) != 0) {
+                if (heap_used) free(kbuf);
+                return -1;
+            }
+            if (heap_used) free(kbuf);
+            return res;
+        }
         case SYS_SOCK_CLOSE:
             return socket_close((int)args->arg1);
+        case SYS_GETUID:
+            return task_getuid();
+        case SYS_SETUID:
+            return task_setuid((uint16_t)args->arg1);
+        case SYS_GETCWD: {
+            const char* cwd = task_getcwd();
+            size_t cap = (size_t)args->arg2;
+            if (!cap) return -1;
+            uint32_t n = 0;
+            while (cwd[n] && n + 1 < cap) n++;
+            if (user_copy_out((void*)args->arg1, cwd, n + 1, caller_cs, usermax) != 0)
+                return -1;
+            return (int)(n + 1);
+        }
+        case SYS_CHDIR: {
+            char path[256];
+            if (user_str_copy(path, sizeof(path), (const char*)args->arg1, caller_cs, usermax) != 0)
+                return -1;
+            return task_chdir(path);
+        }
+        case SYS_SLEEP:
+            task_sleep_ms((uint32_t)args->arg1);
+            return 0;
         case SYS_EXIT:
             task_exit();
             return 0;

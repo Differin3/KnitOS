@@ -56,6 +56,10 @@ struct task {
     struct task_fd fds[TASK_FD_MAX];
     uint32_t cr3;         /* 0 = kernel shared page dir */
     bool is_user;         /* ring-3 process (Phase 3+) */
+    uint32_t user_entry;  /* ring-3 EIP */
+    uint32_t user_stack;  /* ring-3 ESP (top) */
+    uint32_t kstack_top;  /* kernel stack top (TSS.esp0) */
+    uint16_t uid;         /* user id (0 = root) */
 };
 
 void sched_init(void);
@@ -105,6 +109,17 @@ void task_resources_cleanup(int pid);
 
 /* Allocate private identity CR3 for task (0 = already has / fail). */
 int task_enable_aspace(int id);
+
+/*
+ * Запуск ring3-процесса из ELF-образа. Загружает сегменты, выделяет
+ * стек и создаёт READY-задачу (is_user=1). Возвращает tid или <0.
+ */
+int task_spawn_user(const uint8_t* elf_img, size_t elf_len, const char* name);
+
+/* Per-task uid. 0 = root, обычный user = 1000. */
+int task_getuid(void);
+int task_setuid(uint16_t uid);
+int task_setuid_pid(int pid, uint16_t uid);
 
 int sched_autotest(void);
 

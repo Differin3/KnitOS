@@ -4,7 +4,7 @@
 #include "mount.h"
 #include "ramfs.h"
 #include "utils.h"
-#include <string.h>
+#include "string.h"
 
 void vfs_init(void) {
     ramfs_init();

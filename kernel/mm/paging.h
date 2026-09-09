@@ -16,6 +16,10 @@ uint32_t paging_create_identity_dir(void);
 uint32_t paging_clone_dir(uint32_t src_cr3);
 void paging_free_dir(uint32_t cr3);
 
+/* Пометить один 4MB PDE как user-доступный в указанном каталоге (для сегментов
+   конкретного ring3-процесса и его стека). */
+void paging_mark_user_pde(uint32_t cr3, uint32_t pde_index);
+
 /* Test helpers: unmap/remap one 4MB PDE in a given dir (not kernel dir preferred). */
 void paging_unmap_pde(uint32_t cr3, uint32_t pde_index);
 int paging_pde_present(uint32_t cr3, uint32_t pde_index);
@@ -25,6 +29,12 @@ int paging_autotest(void);
 
 /* Flat GDT + user segments; iret to stub; syscall back. Returns 0 ok. */
 int paging_ring3_autotest(void);
+
+/* TSS.esp0 для входа ring3->ring0 через syscall/IRQ (стек ядра задачи). */
+void paging_set_user_esp0(uint32_t esp0);
+
+/* Установка GDT с user-сегментами + TSS (+ пере-инициализация IDT под новые сегменты). */
+void paging_setup_user_mode(void);
 
 /* Per-task aspace isolation smoke. Returns 0 on success. */
 int paging_aspace_autotest(void);
