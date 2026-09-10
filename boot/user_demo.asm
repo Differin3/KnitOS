@@ -13,6 +13,9 @@ global user_demo3_size
 global user_launcher_start
 global user_launcher_end
 global user_launcher_size
+global user_argtest_start
+global user_argtest_end
+global user_argtest_size
 
 user_demo_start:
     incbin "user/hello.elf"
@@ -37,3 +40,9 @@ user_launcher_start:
 user_launcher_end:
 user_launcher_size:
     dd user_launcher_end - user_launcher_start
+
+user_argtest_start:
+    incbin "user/argtest.elf"
+user_argtest_end:
+user_argtest_size:
+    dd user_argtest_end - user_argtest_start

@@ -135,12 +135,34 @@ user/demo3.elf: $(USER_DEMO3_SRC) user/syscall.h user/link.ld
 		-mno-red-zone -mno-mmx -mno-sse -mno-sse2 -nostdlib -Iuser -c -o user/demo3.o $(USER_DEMO3_SRC)
 	$(LD) -m elf_i386 -nostdlib -static -T user/link.ld -z noseparate-code -z max-page-size=0x1000 -o user/demo3.elf user/demo3.o
 
+# ---- user-space library (libk) + crt0 + M1 test app ----
+USER_CFLAGS = -m32 -ffreestanding -fno-pic -fno-pie -fno-stack-protector -fno-builtin -fno-asynchronous-unwind-tables \
+	-mno-red-zone -mno-mmx -mno-sse -mno-sse2 -nostdlib -Iuser
+USER_LIB_OBJ = user/lib/string.o user/lib/stdlib.o user/lib/stdio.o
+
+user/crt0.o: user/crt0.asm
+	$(ASM) $(ASMFLAGS) -o user/crt0.o user/crt0.asm
+
+user/lib/string.o: user/lib/string.c user/lib/libk.h
+	$(CC) $(USER_CFLAGS) -c -o user/lib/string.o user/lib/string.c
+
+user/lib/stdlib.o: user/lib/stdlib.c user/lib/libk.h
+	$(CC) $(USER_CFLAGS) -c -o user/lib/stdlib.o user/lib/stdlib.c
+
+user/lib/stdio.o: user/lib/stdio.c user/lib/libk.h
+	$(CC) $(USER_CFLAGS) -c -o user/lib/stdio.o user/lib/stdio.c
+
+user/argtest.elf: user/argtest.c user/crt0.o $(USER_LIB_OBJ) user/link.ld user/syscall.h
+	$(CC) $(USER_CFLAGS) -c -o user/argtest.o user/argtest.c
+	$(LD) -m elf_i386 -nostdlib -static -T user/link.ld -z noseparate-code -z max-page-size=0x1000 \
+		-o user/argtest.elf user/crt0.o user/argtest.o $(USER_LIB_OBJ)
+
 user/launcher.elf: $(USER_LAUNCHER_SRC) user/syscall.h user/link.ld
 	$(CC) -m32 -ffreestanding -fno-pic -fno-pie -fno-stack-protector -fno-builtin -fno-asynchronous-unwind-tables \
 		-mno-red-zone -mno-mmx -mno-sse -mno-sse2 -nostdlib -Iuser -c -o user/launcher.o $(USER_LAUNCHER_SRC)
 	$(LD) -m elf_i386 -nostdlib -static -T user/link.ld -z noseparate-code -z max-page-size=0x1000 -o user/launcher.elf user/launcher.o
 
-boot/user_demo.o: $(USER_DEMO_SRC) user/hello.elf user/demo2.elf user/demo3.elf user/launcher.elf
+boot/user_demo.o: $(USER_DEMO_SRC) user/hello.elf user/demo2.elf user/demo3.elf user/launcher.elf user/argtest.elf
 	$(ASM) $(ASMFLAGS) -i . -o boot/user_demo.o $(USER_DEMO_SRC)
 
 kernel/elf.o: $(ELF_SRC) kernel/elf.h kernel/serial_log.h

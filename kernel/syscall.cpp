@@ -356,6 +356,18 @@ extern "C" int syscall_handler(struct syscall_args* args, uint32_t caller_cs) {
             return task_getuid();
         case SYS_SETUID:
             return task_setuid((uint16_t)args->arg1);
+        case SYS_GETGID:
+            return task_getgid();
+        case SYS_SETGID:
+            return task_setgid((uint16_t)args->arg1);
+        case SYS_GETPID:
+            return sched_current_id();
+        case SYS_GETPPID: {
+            struct task* cur = sched_current();
+            return cur ? cur->parent_pid : -1;
+        }
+        case SYS_DUP2:
+            return vfs_dup2((int)args->arg1, (int)args->arg2);
         case SYS_GETCWD: {
             const char* cwd = task_getcwd();
             size_t cap = (size_t)args->arg2;

@@ -136,6 +136,7 @@ int task_enable_aspace(int id) {
 static struct task* task_alloc_slot(void);
 static void task_setup_stack(struct task* t);
 static uint32_t user_stack_alloc(void);
+static uint32_t user_prepare_args(uint32_t stack_top, int argc, const char* const* argv);
 static void user_task_trampoline(void* arg);
 
 /* Выделение identity-слота стека для user-процесса (4MB страница PSE). */
@@ -268,7 +269,12 @@ int task_exec_user(const char* path) {
     log_fmt3(LOG_INFO, "sched", "exec_user", "entry", entry, "stack", nstack, "ok", 1u);
 
     /* Уходим в ring3 к новой программе. Сюда не возвращаемся. */
-    user_mode_enter(entry, nstack);
+    {
+        const char* argv0[1];
+        argv0[0] = task_path_base(path);
+        uint32_t usp = user_prepare_args(nstack, 1, argv0);
+        user_mode_enter(entry, usp);
+    }
     return 0;
 }
 
@@ -326,7 +332,10 @@ static void user_task_trampoline(void* arg) {
         return;
     }
     paging_set_user_esp0(t->kstack_top);
-    user_mode_enter(t->user_entry, t->user_stack);
+    const char* argv0[1];
+    argv0[0] = t->name[0] ? t->name : "app";
+    uint32_t usp = user_prepare_args(t->user_stack, 1, argv0);
+    user_mode_enter(t->user_entry, usp);
     task_exit();
 }
 
@@ -338,6 +347,29 @@ static uint32_t user_stack_alloc(void) {
     g_user_stack_next += USER_STACK_SLOT_STEP;
     if (g_user_stack_next >= ELF_USER_VA_MAX) g_user_stack_next = USER_STACK_SLOT_START;
     return slot + USER_STACK_SLOT_STEP; /* top of the slot */
+}
+
+/* Готовит начальный user-стек: [argc][argv[0]..argv[n-1]][NULL][NULL(envp)][строки].
+   Возвращает новый ESP (указывает на argc). */
+static uint32_t user_prepare_args(uint32_t stack_top, int argc, const char* const* argv) {
+    if (argc < 0) argc = 0;
+    if (argc > 8) argc = 8;
+    uint32_t sp = stack_top & ~3u;
+    uint32_t ptrs[8];
+    for (int i = argc - 1; i >= 0; i--) {
+        const char* s = argv[i] ? argv[i] : "";
+        size_t len = 0;
+        while (s[len]) len++;
+        len++; /* NUL */
+        sp -= (uint32_t)len;
+        for (size_t k = 0; k < len; k++) ((char*)sp)[k] = s[k];
+        ptrs[i] = sp;
+    }
+    sp -= 4; *(uint32_t*)sp = 0;            /* envp[0] = NULL */
+    sp -= 4; *(uint32_t*)sp = 0;            /* argv[argc] = NULL */
+    for (int i = argc - 1; i >= 0; i--) { sp -= 4; *(uint32_t*)sp = ptrs[i]; }
+    sp -= 4; *(uint32_t*)sp = (uint32_t)argc;
+    return sp;
 }
 
 static void sched_wake_sleepers(void) {
