@@ -123,6 +123,7 @@ int task_enable_aspace(int id);
  * стек и создаёт READY-задачу (is_user=1). Возвращает tid или <0.
  */
 int task_spawn_user(const uint8_t* elf_img, size_t elf_len, const char* name);
+int task_spawn_user_uid(const uint8_t* elf_img, size_t elf_len, const char* name, uint16_t uid);
 
 /*
  * exec для ring3-процесса: заменяет образ текущей задачи ПОЛНЫМ файлом
