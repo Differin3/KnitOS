@@ -476,6 +476,9 @@ static void boot_populate_user_bins(void) {
     extern char user_demo2_start[], user_demo2_end[];
     extern char user_demo3_start[], user_demo3_end[];
     extern char user_launcher_start[], user_launcher_end[];
+    extern char user_argtest_start[], user_argtest_end[];
+    extern char user_ptytest_start[], user_ptytest_end[];
+    extern char user_sh_start[], user_sh_end[];
     static const struct {
         const char* path;
         char* start;
@@ -485,6 +488,9 @@ static void boot_populate_user_bins(void) {
         { "/tmp/demo2.elf",     user_demo2_start,   user_demo2_end },
         { "/tmp/demo3.elf",     user_demo3_start,   user_demo3_end },
         { "/tmp/launcher.elf",  user_launcher_start, user_launcher_end },
+        { "/tmp/argtest.elf",   user_argtest_start, user_argtest_end },
+        { "/tmp/ptytest.elf",   user_ptytest_start, user_ptytest_end },
+        { "/tmp/sh.elf",        user_sh_start,      user_sh_end },
     };
     for (unsigned i = 0; i < sizeof(bins) / sizeof(bins[0]); i++) {
         size_t sz = (size_t)(bins[i].end - bins[i].start);
@@ -2387,6 +2393,7 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
         if (len >= 7 && cmd[0]=='p'&&cmd[1]=='t'&&cmd[2]=='y'&&cmd[3]=='r'&&cmd[4]=='u'&&cmd[5]=='n'&&cmd[6]==' ') {
             extern char user_argtest_start[], user_argtest_end[];
             extern char user_ptytest_start[], user_ptytest_end[];
+            extern char user_sh_start[], user_sh_end[];
             const char* arg = cmd + 7;
             size_t alen = len - 7;
             char* start = 0;
@@ -2396,9 +2403,11 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
                 start = user_argtest_start; end = user_argtest_end; name = "argtest";
             } else if (alen >= 7 && arg[0]=='p'&&arg[1]=='t'&&arg[2]=='y'&&arg[3]=='t'&&arg[4]=='e'&&arg[5]=='s'&&arg[6]=='t') {
                 start = user_ptytest_start; end = user_ptytest_end; name = "ptytest";
+            } else if (alen >= 2 && arg[0]=='s'&&arg[1]=='h') {
+                start = user_sh_start; end = user_sh_end; name = "sh";
             }
             if (!start) {
-                terminal_writestring("\nUsage: ptyrun argtest|ptytest");
+                terminal_writestring("\nUsage: ptyrun argtest|ptytest|sh");
                 flush_line(); return;
             }
             int pidx = pty_create();

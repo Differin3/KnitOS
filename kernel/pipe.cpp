@@ -74,3 +74,9 @@ void pipe_close(int idx, int write_end) {
     }
     if (p->readers == 0 && p->writers == 0) p->used = false;
 }
+
+void pipe_ref(int idx, int write_end) {
+    if (idx < 0 || idx >= KPIPE_MAX || !g_pipes[idx].used) return;
+    if (write_end) g_pipes[idx].writers++;
+    else g_pipes[idx].readers++;
+}

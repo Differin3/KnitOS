@@ -22,6 +22,9 @@ global user_ptytest_size
 global user_httpd_start
 global user_httpd_end
 global user_httpd_size
+global user_sh_start
+global user_sh_end
+global user_sh_size
 
 user_demo_start:
     incbin "user/hello.elf"
@@ -64,3 +67,9 @@ user_httpd_start:
 user_httpd_end:
 user_httpd_size:
     dd user_httpd_end - user_httpd_start
+
+user_sh_start:
+    incbin "user/sh.elf"
+user_sh_end:
+user_sh_size:
+    dd user_sh_end - user_sh_start

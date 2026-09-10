@@ -204,16 +204,11 @@ extern "C" int syscall_handler(struct syscall_args* args, uint32_t caller_cs) {
         case SYS_CLOSE: {
             uint8_t cty = 0;
             int chandle = -1;
-            if (task_fd_get((int)args->arg1, &cty, &chandle) == 0) {
-                if (cty == TASK_FD_PIPE_R || cty == TASK_FD_PIPE_W) {
-                    pipe_close(chandle, cty == TASK_FD_PIPE_W);
-                    task_fd_close((int)args->arg1);
-                    return 0;
-                }
-                if (cty == TASK_FD_PTY_M || cty == TASK_FD_PTY_S) {
-                    task_fd_close((int)args->arg1);
-                    return 0;
-                }
+            if (task_fd_get((int)args->arg1, &cty, &chandle) == 0 &&
+                (cty == TASK_FD_PIPE_R || cty == TASK_FD_PIPE_W ||
+                 cty == TASK_FD_PTY_M || cty == TASK_FD_PTY_S)) {
+                task_fd_close((int)args->arg1);
+                return 0;
             }
             return vfs_close((int)args->arg1);
         }
@@ -415,8 +410,11 @@ extern "C" int syscall_handler(struct syscall_args* args, uint32_t caller_cs) {
             struct task* cur = sched_current();
             return cur ? cur->parent_pid : -1;
         }
-        case SYS_DUP2:
+        case SYS_DUP2: {
+            int r = task_fd_dup2((int)args->arg1, (int)args->arg2);
+            if (r >= 0) return r;
             return vfs_dup2((int)args->arg1, (int)args->arg2);
+        }
         case SYS_PIPE: {
             int idx = pipe_create();
             if (idx < 0) return -1;

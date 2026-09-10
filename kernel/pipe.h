@@ -21,4 +21,7 @@ int pipe_write(int idx, const void* buf, uint32_t n);
 /* Закрывает один конец канала (write_end != 0 для пишущего конца). */
 void pipe_close(int idx, int write_end);
 
+/* Добавляет ссылку на конец канала (для dup2). */
+void pipe_ref(int idx, int write_end);
+
 #endif
