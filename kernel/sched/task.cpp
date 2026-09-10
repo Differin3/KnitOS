@@ -845,7 +845,15 @@ int task_fd_dup2(int oldfd, int newfd) {
     else if (ty == TASK_FD_PTY_M) pty_ref(handle, 1);
     else if (ty == TASK_FD_PTY_S) pty_ref(handle, 0);
     else return -1;
-    task_fd_close(newfd);
+    /* Освобождаем старый newfd. Сокеты не закрываем: они не имеют refcount
+       и могут использоваться родителем (fork наследует fd-таблицу). */
+    if (g_current->fds[newfd].type == TASK_FD_SOCK) {
+        g_current->fds[newfd].type = TASK_FD_NONE;
+        g_current->fds[newfd].handle = -1;
+        g_current->fds[newfd].path[0] = 0;
+    } else {
+        task_fd_close(newfd);
+    }
     g_current->fds[newfd] = *src;
     return newfd;
 }
