@@ -37,6 +37,21 @@ int main(int argc, char** argv) {
     } else {
         printf("pipe: create failed\n");
     }
+
+    volatile int shared = 111;
+    long pid = sys_fork();
+    if (pid == 0) {
+        shared = 222;
+        printf("child: pid=%d ppid=%d shared=%d\n",
+               (int)sys_getpid(), (int)sys_getppid(), shared);
+        sys_exit(0);
+    } else if (pid > 0) {
+        int status = 0;
+        long reaped = sys_wait(&status);
+        printf("parent: fork=%d reaped=%d shared=%d\n", (int)pid, (int)reaped, shared);
+    } else {
+        printf("fork: failed (%d)\n", (int)pid);
+    }
     printf("argtest done\n");
     return 0;
 }

@@ -12,6 +12,9 @@
 
 extern "C" void sched_switch(uint32_t** old_esp, uint32_t* new_esp);
 extern "C" void user_mode_enter(uint32_t user_eip, uint32_t user_esp);
+extern "C" void user_mode_enter_fork(uint32_t user_eip, uint32_t user_esp);
+extern "C" uint32_t g_syscall_frame_ptr;
+extern "C" uint32_t g_fork_regs[6];
 
 static struct task g_tasks[TASK_MAX];
 static struct task* g_current = 0;
@@ -378,6 +381,98 @@ static uint32_t user_prepare_args(uint32_t stack_top, int argc, const char* cons
     for (int i = argc - 1; i >= 0; i--) { sp -= 4; *(uint32_t*)sp = ptrs[i]; }
     sp -= 4; *(uint32_t*)sp = (uint32_t)argc;
     return sp;
+}
+
+/* Точка входа ring3-ребёнка после fork: возвращает управление в ту же
+   точку, что и родитель, но с EAX=0 (классическая семантика fork). */
+static void user_fork_trampoline(void* arg) {
+    (void)arg;
+    struct task* t = g_current;
+    if (!t || !t->is_user || !t->user_entry) {
+        task_exit();
+        return;
+    }
+    paging_set_user_esp0(t->kstack_top);
+    user_mode_enter_fork(t->user_entry, t->user_stack);
+    task_exit();
+}
+
+int task_fork_user(void) {
+    if (!g_sched_ready || !g_current || !g_current->is_user) return -1;
+    struct task* parent = g_current;
+
+    uint32_t* frame = (uint32_t*)g_syscall_frame_ptr;
+    if (!frame) return -2;
+    uint32_t user_eip = frame[0];
+    uint32_t user_esp = frame[3];
+    if (!user_eip || !user_esp) return -3;
+
+    /* Регистры пользователя, сохранённые pushad в кадре syscall:
+       frame-52=EDI, -48=ESI, -44=EBP, -36=EBX, -32=EDX, -28=ECX. */
+    g_fork_regs[0] = frame[-11];  /* EBP */
+    g_fork_regs[1] = frame[-13];  /* EDI */
+    g_fork_regs[2] = frame[-12];  /* ESI */
+    g_fork_regs[3] = frame[-9];   /* EBX */
+    g_fork_regs[4] = frame[-8];   /* EDX */
+    g_fork_regs[5] = frame[-7];   /* ECX */
+
+    struct task* t = task_alloc_slot();
+    if (!t) return -4;
+
+    uint8_t* kstack = (uint8_t*)malloc(TASK_STACK_SIZE);
+    uint32_t dir = paging_clone_dir_deep(parent->cr3);
+    if (!kstack || !dir) {
+        if (kstack) free(kstack);
+        if (dir) paging_free_dir(dir);
+        t->state = TASK_UNUSED;
+        return -5;
+    }
+
+    t->id = g_next_id++;
+    t->state = TASK_READY;
+    t->stack = kstack;
+    t->entry = user_fork_trampoline;
+    t->arg = 0;
+    t->runs = 0;
+    t->wake_ms = 0;
+    t->wait_reason = WAIT_NONE;
+    t->is_idle = false;
+    t->parent_pid = parent->id;
+    t->cr3 = dir;
+    t->is_user = true;
+    t->user_entry = user_eip;
+    t->user_stack = user_esp;
+    t->kstack_top = (uint32_t)(kstack + TASK_STACK_SIZE);
+    t->uid = parent->uid;
+    t->gid = parent->gid;
+    task_copy_name(t->name, parent->name);
+    task_copy_str(t->cwd, TASK_CWD_MAX, parent->cwd);
+    for (int i = 0; i < TASK_FD_MAX; i++) t->fds[i] = parent->fds[i];
+    task_setup_stack(t);
+
+    log_fmt3(LOG_INFO, "sched", "fork_user", "id", (uint32_t)t->id,
+             "eip", user_eip, "esp", user_esp);
+    return t->id;
+}
+
+int task_wait_child(int pid, int* status_out) {
+    if (!g_sched_ready || !g_current) return -1;
+    int parent = g_current->id;
+    for (;;) {
+        for (int i = 0; i < TASK_MAX; i++) {
+            struct task* c = &g_tasks[i];
+            if (c->state == TASK_UNUSED) continue;
+            if (c->parent_pid != parent) continue;
+            if (pid >= 0 && c->id != pid) continue;
+            if (c->state == TASK_ZOMBIE) {
+                int cid = c->id;
+                task_slot_clear(c);
+                if (status_out) *status_out = 0;
+                return cid;
+            }
+        }
+        sched_yield();
+    }
 }
 
 static void sched_wake_sleepers(void) {

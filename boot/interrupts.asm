@@ -46,6 +46,8 @@ nic_irq_handler:
 global syscall_handler_asm
 extern syscall_handler
 syscall_handler_asm:
+    ; Сохраняем указатель на кадр прерывания (EIP/CS/EFLAGS/ESP/SS) для fork.
+    mov [g_syscall_frame_ptr], esp
     ; Сохраняем регистры до pushad (чтобы использовать их значения)
     push esi  ; arg4
     push edx  ; arg3
@@ -146,7 +148,41 @@ user_mode_enter:
     push ecx             ; user EIP
     iretd
 
-; Обработчик по умолчанию для всех прерываний
+; void user_mode_enter_fork(uint32_t user_eip, uint32_t user_esp)
+; Как user_mode_enter, но восстанавливает регистры родителя из g_fork_regs
+; и кладёт EAX=0 (возврат fork в ребёнке).
+global user_mode_enter_fork
+user_mode_enter_fork:
+    mov ecx, [esp + 4]   ; user eip
+    mov edx, [esp + 8]   ; user esp
+    mov ax, 0x23
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    push dword 0x23      ; SS
+    push edx             ; user ESP
+    pushfd
+    or dword [esp], 0x200 ; IF=1
+    push dword 0x1B      ; user CS
+    push ecx             ; user EIP
+    xor eax, eax         ; fork() == 0 в ребёнке
+    mov ebp, [g_fork_regs + 0]
+    mov edi, [g_fork_regs + 4]
+    mov esi, [g_fork_regs + 8]
+    mov ebx, [g_fork_regs + 12]
+    mov edx, [g_fork_regs + 16]
+    mov ecx, [g_fork_regs + 20]
+    iretd
+
+; Указатель на кадр прерывания int 0x80 (заполняется в syscall_handler_asm).
+global g_syscall_frame_ptr
+section .bss
+align 4
+g_syscall_frame_ptr: resd 1
+global g_fork_regs
+g_fork_regs: resd 6
+section .text
 global default_handler
 default_handler:
     mov al, 0x20
