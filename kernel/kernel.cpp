@@ -29,6 +29,11 @@
 #include "drivers/network/network_config.h"
 #include "drivers/network/socket.h"
 #include "drivers/network/http_server.h"
+#include "drivers/network/remote_shell.h"
+#include "drivers/network/ftp_server.h"
+#include "crypto/sha256.h"
+#include "crypto/chacha20poly1305.h"
+#include "crypto/x25519.h"
 #include "drivers/network/core/netif.h"
 #include "drivers/network/core/net_ports.h"
 #include "drivers/network/core/capture.h"
@@ -97,6 +102,9 @@ static int g_current_session = 0;
 static struct shell_session* cur_session(void) {
     return &g_sessions[g_current_session];
 }
+
+/* Из crypto/crypto_selftest.cpp */
+int crypto_selftest_run(void);
 
 static void shell_write_ip(uint32_t ip) {
     char buf[20];
@@ -1248,6 +1256,8 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
             terminal_writestring("\n  port close tcp|udp <n>  close listening port");
             terminal_writestring("\n  socktest tcp|udp <port>  socket API echo test");
             terminal_writestring("\n  httpserver [port] [max]  HTTP/1.1 server (/www, Keep-Alive)");
+            terminal_writestring("\n  rshd [port] [max]      raw remote shell over TCP (login) ");
+            terminal_writestring("\n  ftpd [port]            FTP server (PASV, login via /etc/passwd)");
             terminal_writestring("\n  autotest fs             FS create/write/read/delete test");
             terminal_writestring("\n  autotest vga            VGA/FB console smoke test");
             terminal_writestring("\n  autotest user           ring3 isolation + uid + demos");
@@ -3655,6 +3665,76 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
             flush_line(); return;
         }
 
+        // rshd [port] [max] | rshd stop — удалённая оболочка (raw, аналог telnet)
+        if (len >= 4 && cmd[0]=='r'&&cmd[1]=='s'&&cmd[2]=='h'&&cmd[3]=='d' &&
+            (len == 4 || cmd[4] == ' ')) {
+            if (len >= 9 && cmd[5]=='s'&&cmd[6]=='t'&&cmd[7]=='o'&&cmd[8]=='p') {
+                if (rsh_server_running()) { rsh_server_stop(); terminal_writestring("\nrshd stopped"); }
+                else terminal_writestring("\nrshd not running");
+                flush_line(); return;
+            }
+            uint16_t port = 2323;
+            int maxs = 0;   /* 0 = без ограничения */
+            size_t pos = 4;
+            if (pos < len && cmd[pos] == ' ') {
+                pos++;
+                uint16_t p = 0;
+                if (shell_parse_u16_token(cmd, len, &pos, &p)) port = p;
+                while (pos < len && cmd[pos] == ' ') pos++;
+                if (pos < len && cmd[pos] >= '0' && cmd[pos] <= '9') {
+                    int m = 0;
+                    while (pos < len && cmd[pos] >= '0' && cmd[pos] <= '9') { m = m * 10 + (cmd[pos] - '0'); pos++; }
+                    if (m > 0 && m <= 64) maxs = m;
+                }
+            }
+            if (ip_get_our_ip() == 0) { terminal_writestring("\nNo IP (run dhcp first)"); flush_line(); return; }
+            int rid = rsh_server_start(port, maxs, 2000);
+            if (rid < 0) { terminal_writestring("\nrshd start failed (already running?)"); flush_line(); return; }
+            terminal_writestring("\nRemote shell (raw) on port ");
+            shell_write_u32((uint32_t)port);
+            terminal_writestring(", pid=");
+            shell_write_u32((uint32_t)rid);
+            terminal_writestring("\nConnect: telnet/nc <ip> ");
+            shell_write_u32((uint32_t)port);
+            terminal_writestring("  (login with /etc/passwd; 'rshd stop' to stop)");
+            flush_line(); return;
+        }
+
+        // ftpd [port] | ftpd stop — FTP-сервер (control + PASV)
+        if (len >= 4 && cmd[0]=='f'&&cmd[1]=='t'&&cmd[2]=='p'&&cmd[3]=='d' &&
+            (len == 4 || cmd[4] == ' ')) {
+            if (len >= 9 && cmd[5]=='s'&&cmd[6]=='t'&&cmd[7]=='o'&&cmd[8]=='p') {
+                if (ftp_server_running()) { ftp_server_stop(); terminal_writestring("\nftpd stopped"); }
+                else terminal_writestring("\nftpd not running");
+                flush_line(); return;
+            }
+            uint16_t port = 21;
+            size_t pos = 4;
+            if (pos < len && cmd[pos] == ' ') {
+                pos++;
+                uint16_t p = 0;
+                if (shell_parse_u16_token(cmd, len, &pos, &p)) port = p;
+            }
+            if (ip_get_our_ip() == 0) { terminal_writestring("\nNo IP (run dhcp first)"); flush_line(); return; }
+            int fid = ftp_server_start(port, 2000);
+            if (fid < 0) { terminal_writestring("\nftpd start failed (already running?)"); flush_line(); return; }
+            terminal_writestring("\nFTP server on port ");
+            shell_write_u32((uint32_t)port);
+            terminal_writestring(", pid=");
+            shell_write_u32((uint32_t)fid);
+            terminal_writestring("\nConnect: ftp/tftp <ip> ");
+            shell_write_u32((uint32_t)port);
+            terminal_writestring("  ('ftpd stop' to stop)");
+            flush_line(); return;
+        }
+
+        // cryptotest — проверка крипто-примитивов по известным векторам (KAT)
+        if (len == 10 && strncmp(cmd, "cryptotest", 10) == 0) {
+            int fails = crypto_selftest_run();
+            terminal_writestring(fails == 0 ? "\nCRYPTO: all tests PASS" : "\nCRYPTO: some tests FAILED");
+            flush_line(); return;
+        }
+
         // httpget <host> [path] — HTTP/1.1 GET client
         const char pref_httpget[] = "httpget ";
         if (len >= 8) {
@@ -4087,7 +4167,7 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
         "login", "logout", "whoami", "id", "users", "useradd", "userdel", "usermod", "groupadd", "groups", "passwd", "su", "chgrp",
         "sessions", "session", "newsession",
         "cat", "nano", "write", "rm", "reboot", "shutdown", "poweroff", "acpi", "resolution", "test",
-        "network", "ifconfig", "dhcp", "ip", "udp", "tcp", "udplisten", "ping", "traceroute", "tcpdump", "httpget", "httpserver", "dns", "arp", "netstat", "ports", "port", "route", "socktest", "log", "autotest", 0
+        "network", "ifconfig", "dhcp", "ip", "udp", "tcp", "udplisten", "ping", "traceroute", "tcpdump", "httpget", "httpserver", "rshd", "ftpd", "dns", "arp", "netstat", "ports", "port", "route", "socktest", "cryptotest", "log", "autotest", 0
     };
     static const char* network_subcommands[] = { "static", "save", "reload", 0 };
     static const char* log_subcommands[] = { "off", "err", "info", "debug", "test", 0 };

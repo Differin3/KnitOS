@@ -88,6 +88,8 @@ KERNEL_OBJ = boot/boot.o boot/interrupts.o boot/user_demo.o kernel/sched/switch.
 	kernel/drivers/network/core/net_queue.o kernel/drivers/network/core/net_rx.o \
 	kernel/drivers/network/core/net_wait.o kernel/drivers/network/core/net_ports.o \
 	kernel/drivers/network/http_protocol.o kernel/drivers/network/http_gzip.o kernel/drivers/network/http_server.o \
+	kernel/drivers/network/remote_shell.o kernel/drivers/network/ftp_server.o \
+	kernel/crypto/sha256.o kernel/crypto/chacha20poly1305.o kernel/crypto/x25519.o kernel/crypto/crypto_selftest.o \
 	kernel/drivers/network/drivers/rtl8139/rtl8139.o kernel/drivers/network/drivers/pcnet/pcnet.o \
 	kernel/drivers/network/drivers/virtio_net/virtio_net.o \
 	kernel/drivers/network/protocols/ethernet.o kernel/drivers/network/protocols/arp.o \
@@ -330,6 +332,21 @@ kernel/drivers/network/socket.o: $(SOCKET_SRC) kernel/drivers/network/socket.h k
 kernel/drivers/network/http_server.o: $(HTTP_SERVER_SRC) kernel/drivers/network/http_server.h kernel/drivers/network/http_protocol.h kernel/drivers/network/socket.h kernel/fs.h kernel/serial_log.h kernel/drivers/timer/pit.h
 	$(CC) $(CFLAGS) -c -o kernel/drivers/network/http_server.o $(HTTP_SERVER_SRC)
 
+kernel/drivers/network/remote_shell.o: kernel/drivers/network/remote_shell.cpp kernel/drivers/network/remote_shell.h kernel/drivers/network/socket.h kernel/fs.h kernel/vfs.h kernel/utils.h kernel/user_auth.h kernel/string.h kernel/sched/task.h
+	$(CC) $(CFLAGS) -c -o kernel/drivers/network/remote_shell.o kernel/drivers/network/remote_shell.cpp
+
+kernel/drivers/network/ftp_server.o: kernel/drivers/network/ftp_server.cpp kernel/drivers/network/ftp_server.h kernel/drivers/network/socket.h kernel/fs.h kernel/fs_file.h kernel/vfs.h kernel/utils.h kernel/user_auth.h kernel/string.h kernel/sched/task.h
+	$(CC) $(CFLAGS) -c -o kernel/drivers/network/ftp_server.o kernel/drivers/network/ftp_server.cpp
+
+kernel/crypto/sha256.o: kernel/crypto/sha256.cpp kernel/crypto/sha256.h
+	$(CC) $(CFLAGS) -c -o kernel/crypto/sha256.o kernel/crypto/sha256.cpp
+
+kernel/crypto/chacha20poly1305.o: kernel/crypto/chacha20poly1305.cpp kernel/crypto/chacha20poly1305.h
+	$(CC) $(CFLAGS) -c -o kernel/crypto/chacha20poly1305.o kernel/crypto/chacha20poly1305.cpp
+
+kernel/crypto/x25519.o: kernel/crypto/x25519.cpp kernel/crypto/x25519.h
+	$(CC) $(CFLAGS) -c -o kernel/crypto/x25519.o kernel/crypto/x25519.cpp
+
 kernel/drivers/network/http_protocol.o: $(HTTP_PROTOCOL_SRC) kernel/drivers/network/http_protocol.h
 	$(CC) $(CFLAGS) -c -o kernel/drivers/network/http_protocol.o $(HTTP_PROTOCOL_SRC)
 
@@ -340,3 +357,6 @@ clean:
 	rm -f $(KERNEL_OBJ) $(KERNEL_BIN) $(ISO) user/hello.o user/hello.elf user/demo2.o user/demo2.elf user/demo3.o user/demo3.elf user/launcher.o user/launcher.elf
 
 .PHONY: all check clean
+
+kernel/crypto/crypto_selftest.o: kernel/crypto/crypto_selftest.cpp kernel/crypto/sha256.h kernel/crypto/chacha20poly1305.h kernel/crypto/x25519.h
+	$(CC) $(CFLAGS) -c -o kernel/crypto/crypto_selftest.o kernel/crypto/crypto_selftest.cpp
