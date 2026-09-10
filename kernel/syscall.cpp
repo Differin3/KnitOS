@@ -11,6 +11,7 @@
 #include "sched/task.h"
 #include "mm/paging.h"
 #include "pipe.h"
+#include "pty.h"
 #include <stddef.h>
 
 extern "C" void syscall_handler_asm();
@@ -121,6 +122,24 @@ extern "C" int syscall_handler(struct syscall_args* args, uint32_t caller_cs) {
                     return -1;
                 return r;
             }
+            if (fd >= 0 && fd < TASK_FD_MAX && task_fd_get(fd, &ty, &handle) == 0 &&
+                ty == TASK_FD_PTY_S) {
+                char kb[512];
+                uint32_t n = ulen < sizeof(kb) ? (uint32_t)ulen : (uint32_t)sizeof(kb);
+                int r = pty_slave_read(handle, kb, n);
+                if (r > 0 && user_copy_out(ubuf, kb, (uint32_t)r, caller_cs, usermax) != 0)
+                    return -1;
+                return r;
+            }
+            if (fd >= 0 && fd < TASK_FD_MAX && task_fd_get(fd, &ty, &handle) == 0 &&
+                ty == TASK_FD_PTY_M) {
+                char kb[512];
+                uint32_t n = ulen < sizeof(kb) ? (uint32_t)ulen : (uint32_t)sizeof(kb);
+                int r = pty_master_read(handle, kb, n);
+                if (r > 0 && user_copy_out(ubuf, kb, (uint32_t)r, caller_cs, usermax) != 0)
+                    return -1;
+                return r;
+            }
             /* Не занятое файлом fd 0-2 — консоль (stdin: клавиатура). */
             if (fd >= 0 && fd <= 2) {
                 char kb[128];
@@ -158,6 +177,10 @@ extern "C" int syscall_handler(struct syscall_args* args, uint32_t caller_cs) {
                 res = vfs_fwrite(fd, kbuf, ulen);
             } else if (fd >= 0 && fd < TASK_FD_MAX && ty == TASK_FD_PIPE_W) {
                 res = pipe_write(handle, kbuf, ulen);
+            } else if (fd >= 0 && fd < TASK_FD_MAX && ty == TASK_FD_PTY_S) {
+                res = pty_slave_write(handle, kbuf, ulen);
+            } else if (fd >= 0 && fd < TASK_FD_MAX && ty == TASK_FD_PTY_M) {
+                res = pty_master_write(handle, kbuf, ulen);
             } else if (fd >= 0 && fd <= 2) {
                 res = console_write((const char*)kbuf, (uint32_t)ulen);
             } else {
@@ -181,11 +204,16 @@ extern "C" int syscall_handler(struct syscall_args* args, uint32_t caller_cs) {
         case SYS_CLOSE: {
             uint8_t cty = 0;
             int chandle = -1;
-            if (task_fd_get((int)args->arg1, &cty, &chandle) == 0 &&
-                (cty == TASK_FD_PIPE_R || cty == TASK_FD_PIPE_W)) {
-                pipe_close(chandle, cty == TASK_FD_PIPE_W);
-                task_fd_close((int)args->arg1);
-                return 0;
+            if (task_fd_get((int)args->arg1, &cty, &chandle) == 0) {
+                if (cty == TASK_FD_PIPE_R || cty == TASK_FD_PIPE_W) {
+                    pipe_close(chandle, cty == TASK_FD_PIPE_W);
+                    task_fd_close((int)args->arg1);
+                    return 0;
+                }
+                if (cty == TASK_FD_PTY_M || cty == TASK_FD_PTY_S) {
+                    task_fd_close((int)args->arg1);
+                    return 0;
+                }
             }
             return vfs_close((int)args->arg1);
         }
@@ -400,6 +428,31 @@ extern "C" int syscall_handler(struct syscall_args* args, uint32_t caller_cs) {
             fds[1] = wfd;
             if (user_copy_out((void*)args->arg1, fds, sizeof(fds), caller_cs, usermax) != 0)
                 return -1;
+            return 0;
+        }
+        case SYS_PTY_OPEN: {
+            int idx = pty_create();
+            if (idx < 0) return -1;
+            int mfd = task_fd_alloc(TASK_FD_PTY_M, idx, 0);
+            int sfd = task_fd_alloc(TASK_FD_PTY_S, idx, 0);
+            if (mfd < 0 || sfd < 0) return -1;
+            pty_ref(idx, 1);
+            pty_ref(idx, 0);
+            int fds[2];
+            fds[0] = mfd;
+            fds[1] = sfd;
+            if (user_copy_out((void*)args->arg1, fds, sizeof(fds), caller_cs, usermax) != 0)
+                return -1;
+            return 0;
+        }
+        case SYS_ISATTY: {
+            int fd = (int)args->arg1;
+            uint8_t ty = 0;
+            int h = -1;
+            if (fd >= 0 && fd < TASK_FD_MAX && task_fd_get(fd, &ty, &h) == 0) {
+                return (ty == TASK_FD_PTY_M || ty == TASK_FD_PTY_S) ? 1 : 0;
+            }
+            if (fd >= 0 && fd <= 2) return 1; /* неявная консоль */
             return 0;
         }
         case SYS_GETCWD: {

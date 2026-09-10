@@ -84,6 +84,7 @@ KERNEL_OBJ = boot/boot.o boot/interrupts.o boot/user_demo.o kernel/sched/switch.
 	kernel/drivers/storage/disk_manager.o kernel/mount.o kernel/dev.o kernel/driver_manager.o \
 	kernel/syscall.o kernel/kernel_api.o kernel/user_auth.o \
 	kernel/pipe.o \
+	kernel/pty.o \
 	kernel/drivers/network/nic.o kernel/drivers/network/socket.o \
 	kernel/drivers/network/core/skb.o kernel/drivers/network/core/netif.o \
 	kernel/drivers/network/core/net_queue.o kernel/drivers/network/core/net_rx.o \
@@ -158,12 +159,17 @@ user/argtest.elf: user/argtest.c user/crt0.o $(USER_LIB_OBJ) user/link.ld user/s
 	$(LD) -m elf_i386 -nostdlib -static -T user/link.ld -z noseparate-code -z max-page-size=0x1000 \
 		-o user/argtest.elf user/crt0.o user/argtest.o $(USER_LIB_OBJ)
 
+user/ptytest.elf: user/ptytest.c user/crt0.o $(USER_LIB_OBJ) user/link.ld user/syscall.h
+	$(CC) $(USER_CFLAGS) -c -o user/ptytest.o user/ptytest.c
+	$(LD) -m elf_i386 -nostdlib -static -T user/link.ld -z noseparate-code -z max-page-size=0x1000 \
+		-o user/ptytest.elf user/crt0.o user/ptytest.o $(USER_LIB_OBJ)
+
 user/launcher.elf: $(USER_LAUNCHER_SRC) user/syscall.h user/link.ld
 	$(CC) -m32 -ffreestanding -fno-pic -fno-pie -fno-stack-protector -fno-builtin -fno-asynchronous-unwind-tables \
 		-mno-red-zone -mno-mmx -mno-sse -mno-sse2 -nostdlib -Iuser -c -o user/launcher.o $(USER_LAUNCHER_SRC)
 	$(LD) -m elf_i386 -nostdlib -static -T user/link.ld -z noseparate-code -z max-page-size=0x1000 -o user/launcher.elf user/launcher.o
 
-boot/user_demo.o: $(USER_DEMO_SRC) user/hello.elf user/demo2.elf user/demo3.elf user/launcher.elf user/argtest.elf
+boot/user_demo.o: $(USER_DEMO_SRC) user/hello.elf user/demo2.elf user/demo3.elf user/launcher.elf user/argtest.elf user/ptytest.elf
 	$(ASM) $(ASMFLAGS) -i . -o boot/user_demo.o $(USER_DEMO_SRC)
 
 kernel/elf.o: $(ELF_SRC) kernel/elf.h kernel/serial_log.h
@@ -228,6 +234,9 @@ kernel/user_auth.o: kernel/user_auth.cpp kernel/user_auth.h kernel/fs.h kernel/s
 
 kernel/pipe.o: kernel/pipe.cpp kernel/pipe.h kernel/sched/task.h
 	$(CC) $(CFLAGS) -c -o kernel/pipe.o kernel/pipe.cpp
+
+kernel/pty.o: kernel/pty.cpp kernel/pty.h kernel/sched/task.h
+	$(CC) $(CFLAGS) -c -o kernel/pty.o kernel/pty.cpp
 
 kernel/drivers/storage/ata.o: $(ATA_SRC) kernel/drivers/storage/ata.h
 	$(CC) $(CFLAGS) -c -o kernel/drivers/storage/ata.o $(ATA_SRC)

@@ -18,6 +18,8 @@
 #define TASK_FD_FILE 2
 #define TASK_FD_PIPE_R 3
 #define TASK_FD_PIPE_W 4
+#define TASK_FD_PTY_M 5
+#define TASK_FD_PTY_S 6
 
 enum task_state {
     TASK_UNUSED = 0,
@@ -100,6 +102,8 @@ int task_getcwd_pid(int pid, char* out, size_t out_cap);
 
 /* Per-task fd table */
 int task_fd_alloc(uint8_t type, int handle, const char* path);
+int task_attach_pty_slave(int pid, int pty_idx);
+int task_alive(int pid);
 int task_fd_close(int fd);
 void task_fd_close_all(struct task* t);
 int task_fd_get(int fd, uint8_t* type_out, int* handle_out);

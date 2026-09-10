@@ -44,6 +44,7 @@
 #include "drivers/power/acpi.h"
 #include "drivers/power/rtc.h"
 #include "sched/task.h"
+#include "pty.h"
 #include "serial_log.h"
 #include "user_auth.h"
 #include "mm/paging.h"
@@ -1243,6 +1244,7 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
             terminal_writestring("\n  sessions  session <n>  newsession <name>  (independent terminals)");
             terminal_writestring("\n  clear   echo   version   date   setdate YYYY-MM-DD   settime HH:MM:SS");
             terminal_writestring("\n  runelf hello   disk   reboot   shutdown  poweroff");
+            terminal_writestring("\n  ptyrun argtest|ptytest   (interactive program over a PTY)");
             terminal_writestring("\n  acpi                  show ACPI tables info (S5, reset)");
             terminal_writestring("\n  ps                     tasks (systemd=0, idle, ...)");
             terminal_writestring("\n  kill [-9] <pid>         terminate kthread (not systemd/idle)");
@@ -2376,6 +2378,67 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
             } else {
                 terminal_writestring(" (failed)");
             }
+            flush_line(); return;
+        }
+        if (len >= 7 && cmd[0]=='p'&&cmd[1]=='t'&&cmd[2]=='y'&&cmd[3]=='r'&&cmd[4]=='u'&&cmd[5]=='n'&&cmd[6]==' ') {
+            extern char user_argtest_start[], user_argtest_end[];
+            extern char user_ptytest_start[], user_ptytest_end[];
+            const char* arg = cmd + 7;
+            size_t alen = len - 7;
+            char* start = 0;
+            char* end = 0;
+            const char* name = 0;
+            if (alen >= 7 && arg[0]=='a'&&arg[1]=='r'&&arg[2]=='g'&&arg[3]=='t'&&arg[4]=='e'&&arg[5]=='s'&&arg[6]=='t') {
+                start = user_argtest_start; end = user_argtest_end; name = "argtest";
+            } else if (alen >= 7 && arg[0]=='p'&&arg[1]=='t'&&arg[2]=='y'&&arg[3]=='t'&&arg[4]=='e'&&arg[5]=='s'&&arg[6]=='t') {
+                start = user_ptytest_start; end = user_ptytest_end; name = "ptytest";
+            }
+            if (!start) {
+                terminal_writestring("\nUsage: ptyrun argtest|ptytest");
+                flush_line(); return;
+            }
+            int pidx = pty_create();
+            if (pidx < 0) { terminal_writestring("\npty: no free pty"); flush_line(); return; }
+            pty_ref(pidx, 1); /* мастер держит шелл */
+            int ctid = task_spawn_user((const uint8_t*)start, (size_t)(end - start), name);
+            if (ctid < 0) {
+                pty_unref(pidx, 1);
+                terminal_writestring("\npty: spawn failed");
+                flush_line(); return;
+            }
+            task_attach_pty_slave(ctid, pidx);
+            terminal_writestring("\n[pty] started; Ctrl+C to interrupt");
+            while (task_alive(ctid)) {
+                int progressed = 0;
+                for (int kdrain = 0; kdrain < 8; kdrain++) {
+                    char c = poll_key();
+                    if (!c) break;
+                    if (c == 0x03) {
+                        pty_master_write(pidx, "\x03", 1);
+                        progressed = 1;
+                        break;
+                    }
+                    if (c == '\r') c = '\n';
+                    pty_master_write(pidx, &c, 1);
+                    progressed = 1;
+                }
+                char ob[256];
+                int r = pty_master_read_nb(pidx, ob, sizeof(ob));
+                if (r > 0) {
+                    for (int i = 0; i < r; i++) terminal_putchar(ob[i]);
+                    progressed = 1;
+                }
+                if (pty_take_signal(pidx)) task_kill(ctid);
+                if (!progressed) task_sleep_ms(10);
+            }
+            for (;;) {
+                char ob[256];
+                int r = pty_master_read(pidx, ob, sizeof(ob));
+                if (r <= 0) break;
+                for (int i = 0; i < r; i++) terminal_putchar(ob[i]);
+            }
+            pty_unref(pidx, 1);
+            terminal_writestring("\n[pty] program exited");
             flush_line(); return;
         }
         if (len==3 && cmd[0]=='i'&&cmd[1]=='r'&&cmd[2]=='q') {

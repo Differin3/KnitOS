@@ -8,6 +8,7 @@
 #include "vfs.h"
 #include "mm/paging.h"
 #include "elf.h"
+#include "pty.h"
 #include <stddef.h>
 
 extern "C" void sched_switch(uint32_t** old_esp, uint32_t* new_esp);
@@ -747,6 +748,10 @@ int task_fd_close(int fd) {
         socket_close(e->handle);
     } else if (e->type == TASK_FD_FILE && e->handle >= 0) {
         fs_ofile_release(e->handle);
+    } else if (e->type == TASK_FD_PTY_M) {
+        pty_unref(e->handle, 1);
+    } else if (e->type == TASK_FD_PTY_S) {
+        pty_unref(e->handle, 0);
     }
     e->type = TASK_FD_NONE;
     e->handle = -1;
@@ -762,6 +767,10 @@ void task_fd_close_all(struct task* t) {
         } else if (t->fds[i].type == TASK_FD_FILE && t->fds[i].handle >= 0) {
             fs_ofile_release(t->fds[i].handle);
             t->fds[i].handle = -1;
+        } else if (t->fds[i].type == TASK_FD_PTY_M) {
+            pty_unref(t->fds[i].handle, 1);
+        } else if (t->fds[i].type == TASK_FD_PTY_S) {
+            pty_unref(t->fds[i].handle, 0);
         }
         t->fds[i].type = TASK_FD_NONE;
         t->fds[i].path[0] = 0;
@@ -773,6 +782,34 @@ int task_fd_get(int fd, uint8_t* type_out, int* handle_out) {
     if (g_current->fds[fd].type == TASK_FD_NONE) return -1;
     if (type_out) *type_out = g_current->fds[fd].type;
     if (handle_out) *handle_out = g_current->fds[fd].handle;
+    return 0;
+}
+
+/* Привязать stdin/stdout/stderr (fd 0..2) задачи к slave-концу PTY. */
+int task_attach_pty_slave(int pid, int pty_idx) {
+    for (int i = 0; i < TASK_MAX; i++) {
+        struct task* t = &g_tasks[i];
+        if (t->state == TASK_UNUSED) continue;
+        if (t->id != pid) continue;
+        for (int f = 0; f < 3; f++) {
+            t->fds[f].type = TASK_FD_PTY_S;
+            t->fds[f].handle = pty_idx;
+            t->fds[f].path[0] = 0;
+            pty_ref(pty_idx, 0);
+        }
+        return 0;
+    }
+    return -1;
+}
+
+int task_alive(int pid) {
+    if (pid < 0) return 0;
+    for (int i = 0; i < TASK_MAX; i++) {
+        struct task* t = &g_tasks[i];
+        if (t->state == TASK_UNUSED) continue;
+        if (t->id != pid) continue;
+        return t->state != TASK_ZOMBIE;
+    }
     return 0;
 }
 

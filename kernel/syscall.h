@@ -55,6 +55,9 @@
 #define SYS_SETGID      45
 #define SYS_GETPPID     46
 
+#define SYS_PTY_OPEN    47
+#define SYS_ISATTY      48
+
 struct syscall_args {
     uint32_t arg0;
     uint32_t arg1;
