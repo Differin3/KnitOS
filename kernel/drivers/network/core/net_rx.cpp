@@ -127,6 +127,14 @@ void net_stack_init(void) {
 }
 
 void net_process(void) {
+    /* Сериализация: net_process вызывается и из shell main, и из kthread'ов
+       (socket_service_network). Без этого — гонка на rx_queue и TCP-состоянии
+       (при втором соединении сеть залипала). */
+    static volatile int busy = 0;
+    int old = 1;
+    asm volatile("xchgl %0, %1" : "+r"(old), "+m"(busy) : : "memory");
+    if (old) return;   /* уже обрабатывается другой задачей */
+
     int n = netif_count();
     for (int i = 0; i < n; i++) {
         struct netif* nif = netif_get(i);
@@ -143,4 +151,5 @@ void net_process(void) {
         }
     }
     ip_reassembly_gc();
+    busy = 0;
 }

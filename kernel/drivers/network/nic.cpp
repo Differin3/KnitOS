@@ -93,7 +93,9 @@ static int nic_attach_netif(const char* name) {
     netif_set_default(nic_netif);
 
     if (nic_dev.hw_type == NIC_HW_VIRTIO) virtio_net_enable_irq(&nic_dev);
-    else if (nic_dev.hw_type == NIC_HW_RTL8139) rtl8139_enable_irq(&nic_dev);
+    /* RTL8139: poll-only (IRQ не включаем) — RX обрабатывает главный цикл.
+       Позволяет исключить IRQ-шторм при нескольких соединениях. */
+    else if (nic_dev.hw_type == NIC_HW_RTL8139) { /* rtl8139_enable_irq(&nic_dev); */ }
     return 0;
 }
 
