@@ -84,6 +84,7 @@ KERNEL_OBJ = boot/boot.o boot/interrupts.o boot/user_demo.o kernel/sched/switch.
 	kernel/drivers/storage/disk_manager.o kernel/mount.o kernel/dev.o kernel/driver_manager.o \
 	kernel/syscall.o kernel/kernel_api.o kernel/user_auth.o \
 	kernel/pipe.o \
+	kernel/kcmd.o \
 	kernel/pty.o \
 	kernel/drivers/network/nic.o kernel/drivers/network/socket.o \
 	kernel/drivers/network/core/skb.o kernel/drivers/network/core/netif.o \
@@ -257,6 +258,9 @@ kernel/user_auth.o: kernel/user_auth.cpp kernel/user_auth.h kernel/fs.h kernel/s
 
 kernel/pipe.o: kernel/pipe.cpp kernel/pipe.h kernel/sched/task.h
 	$(CC) $(CFLAGS) -c -o kernel/pipe.o kernel/pipe.cpp
+
+kernel/kcmd.o: kernel/kcmd.cpp kernel/kcmd.h kernel/kernel.h kernel/sched/task.h kernel/fs.h
+	$(CC) $(CFLAGS) -c -o kernel/kcmd.o kernel/kcmd.cpp
 
 kernel/pty.o: kernel/pty.cpp kernel/pty.h kernel/sched/task.h
 	$(CC) $(CFLAGS) -c -o kernel/pty.o kernel/pty.cpp

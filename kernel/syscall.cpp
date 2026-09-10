@@ -17,6 +17,7 @@
 #include "crypto/x25519.h"
 #include "crypto/ed25519.h"
 #include "crypto/rng.h"
+#include "kcmd.h"
 #include <string.h>
 #include <stddef.h>
 
@@ -564,6 +565,19 @@ extern "C" int syscall_handler(struct syscall_args* args, uint32_t caller_cs) {
             default:
                 return -1;
             }
+        }
+        case SYS_KCMD: {
+            char kcmd[128];
+            if (user_str_copy(kcmd, sizeof(kcmd), (const char*)args->arg1, caller_cs, usermax) != 0)
+                return -1;
+            static char kout[2048];
+            int n = kernel_run_command(kcmd, kout, sizeof(kout));
+            if (n <= 0) return n;
+            size_t ulen = (size_t)args->arg3;
+            if (ulen > (size_t)n) ulen = (size_t)n;
+            if (user_copy_out((void*)args->arg2, kout, (uint32_t)ulen, caller_cs, usermax) != 0)
+                return -1;
+            return (int)ulen;
         }
         case SYS_GETCWD: {
             const char* cwd = task_getcwd();
