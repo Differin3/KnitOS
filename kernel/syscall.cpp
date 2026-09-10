@@ -15,6 +15,7 @@
 #include "crypto/sha256.h"
 #include "crypto/chacha20poly1305.h"
 #include "crypto/x25519.h"
+#include "crypto/ed25519.h"
 #include "crypto/rng.h"
 #include <string.h>
 #include <stddef.h>
@@ -500,6 +501,42 @@ extern "C" int syscall_handler(struct syscall_args* args, uint32_t caller_cs) {
                 rng_bytes(outb, n);
                 if (n && user_copy_out((void*)req.out, outb, n, caller_cs, usermax) != 0) return -1;
                 return (int)n;
+            }
+            case KC_ED25519_KEYGEN: {
+                if (req.in1_len != 32 || req.out_cap < 32) return -1;
+                if (user_copy_in(in1, (const void*)req.in1, 32, caller_cs, usermax) != 0) return -1;
+                uint8_t sk[64];
+                ed25519_keypair_from_seed(outb, sk, in1);
+                if (user_copy_out((void*)req.out, outb, 32, caller_cs, usermax) != 0) return -1;
+                return 32;
+            }
+            case KC_ED25519_SIGN: {
+                if (req.in1_len != 64 || req.in2_len > sizeof(in2) || req.out_cap < 64) return -1;
+                if (user_copy_in(in1, (const void*)req.in1, 64, caller_cs, usermax) != 0) return -1;
+                if (req.in2_len && user_copy_in(in2, (const void*)req.in2, req.in2_len, caller_cs, usermax) != 0) return -1;
+                ed25519_sign(outb, in2, req.in2_len, in1);
+                if (user_copy_out((void*)req.out, outb, 64, caller_cs, usermax) != 0) return -1;
+                return 64;
+            }
+            case KC_CHACHA20: {
+                /* in1=key(32), in2=nonce(12), in3=data, in4_len=counter */
+                if (req.in1_len != 32 || req.in2_len != 12) return -1;
+                if (req.in3_len > sizeof(in3)) return -1;
+                if (user_copy_in(in1, (const void*)req.in1, 32, caller_cs, usermax) != 0) return -1;
+                if (user_copy_in(in2, (const void*)req.in2, 12, caller_cs, usermax) != 0) return -1;
+                if (req.in3_len && user_copy_in(in3, (const void*)req.in3, req.in3_len, caller_cs, usermax) != 0) return -1;
+                chacha20_xor(outb, in3, req.in3_len, in1, in2, req.in4_len);
+                if (req.in3_len && user_copy_out((void*)req.out, outb, req.in3_len, caller_cs, usermax) != 0) return -1;
+                return (int)req.in3_len;
+            }
+            case KC_POLY1305: {
+                if (req.in1_len != 32 || req.in2_len > sizeof(in2)) return -1;
+                if (user_copy_in(in1, (const void*)req.in1, 32, caller_cs, usermax) != 0) return -1;
+                if (req.in2_len && user_copy_in(in2, (const void*)req.in2, req.in2_len, caller_cs, usermax) != 0) return -1;
+                if (req.out_cap < 16) return -1;
+                poly1305(outb, in2, req.in2_len, in1);
+                if (user_copy_out((void*)req.out, outb, 16, caller_cs, usermax) != 0) return -1;
+                return 16;
             }
             case KC_AEAD_ENC:
             case KC_AEAD_DEC: {

@@ -75,6 +75,10 @@ struct kcrypto_req {
 #define KC_AEAD_DEC     4
 #define KC_X25519       5
 #define KC_RANDOM       6
+#define KC_ED25519_KEYGEN 7
+#define KC_ED25519_SIGN   8
+#define KC_CHACHA20       9
+#define KC_POLY1305       10
 
 struct syscall_args {
     uint32_t arg0;

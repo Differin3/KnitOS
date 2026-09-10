@@ -56,6 +56,15 @@ int kc_hmac_sha256(const void* key, size_t klen, const void* msg, size_t mlen,
 int kc_x25519(const unsigned char scalar[32], const unsigned char point[32],
               unsigned char out[32]);
 int kc_random(void* out, size_t n);
+int kc_ed25519_keygen(const unsigned char seed[32], unsigned char pk[32]);
+int kc_ed25519_sign(unsigned char sig[64], const void* msg, size_t len,
+                    const unsigned char sk[64]);
+/* Сырые примитивы (для chacha20-poly1305@openssh.com). */
+int kc_chacha20(void* out, const void* in, size_t len,
+                const unsigned char key[32], const unsigned char nonce[12],
+                uint32_t counter);
+int kc_poly1305(unsigned char tag[16], const void* msg, size_t len,
+                const unsigned char key[32]);
 /* out: plain_len + 16 байт */
 int kc_aead_encrypt(const unsigned char key[32], const unsigned char nonce[12],
                     const void* aad, size_t aad_len,

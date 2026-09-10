@@ -480,6 +480,7 @@ static void boot_populate_user_bins(void) {
     extern char user_ptytest_start[], user_ptytest_end[];
     extern char user_sh_start[], user_sh_end[];
     extern char user_ksshd_start[], user_ksshd_end[];
+    extern char user_sshd_start[], user_sshd_end[];
     static const struct {
         const char* path;
         char* start;
@@ -493,6 +494,7 @@ static void boot_populate_user_bins(void) {
         { "/tmp/ptytest.elf",   user_ptytest_start, user_ptytest_end },
         { "/tmp/sh.elf",        user_sh_start,      user_sh_end },
         { "/tmp/ksshd.elf",     user_ksshd_start,   user_ksshd_end },
+        { "/tmp/sshd.elf",      user_sshd_start,    user_sshd_end },
     };
     for (unsigned i = 0; i < sizeof(bins) / sizeof(bins[0]); i++) {
         size_t sz = (size_t)(bins[i].end - bins[i].start);
@@ -2336,7 +2338,7 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
             refresh_status_line();
             flush_line(); return;
         }
-        if (len >= 12 && cmd[0]=='r'&&cmd[1]=='u'&&cmd[2]=='n'&&cmd[3]=='e'&&cmd[4]=='l'&&cmd[5]=='f'&&cmd[6]==' ') {
+        if (len >= 8 && cmd[0]=='r'&&cmd[1]=='u'&&cmd[2]=='n'&&cmd[3]=='e'&&cmd[4]=='l'&&cmd[5]=='f'&&cmd[6]==' ') {
             extern char user_demo_start[], user_demo_end[];
             extern char user_demo2_start[], user_demo2_end[];
             extern char user_demo3_start[], user_demo3_end[];
@@ -2344,6 +2346,7 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
             extern char user_argtest_start[], user_argtest_end[];
             extern char user_httpd_start[], user_httpd_end[];
             extern char user_ksshd_start[], user_ksshd_end[];
+            extern char user_sshd_start[], user_sshd_end[];
             const char* arg = cmd + 7;
             const char* which = 0;
             char* start = 0;
@@ -2371,9 +2374,12 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
             } else if (alen >= 5 && arg[0]=='k'&&arg[1]=='s'&&arg[2]=='s'&&arg[3]=='h'&&arg[4]=='d') {
                 which = "ksshd";
                 start = user_ksshd_start; end = user_ksshd_end; name = "ksshd";
+            } else if (alen >= 4 && arg[0]=='s'&&arg[1]=='s'&&arg[2]=='h'&&arg[3]=='d') {
+                which = "sshd";
+                start = user_sshd_start; end = user_sshd_end; name = "sshd";
             }
             if (!which) {
-                terminal_writestring("\nUsage: runelf hello|demo2|demo3|launcher|argtest|httpd|ksshd");
+                terminal_writestring("\nUsage: runelf hello|demo2|demo3|launcher|argtest|httpd|ksshd|sshd");
                 flush_line(); return;
             }
             size_t sz = (size_t)(end - start);
