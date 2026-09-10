@@ -87,14 +87,14 @@ static void vga_hw_cursor(size_t row, size_t col) {
     outb(0x3D5, (uint8_t)((pos >> 8) & 0xFF));
 }
 
-/* Полный светящийся блок (scanlines 0..15) вместо тонкой полоски, чтобы
-   курсор был хорошо виден. Мигание включено (бит 5 регистра 0x0A = 0). */
-static void vga_cursor_block(void) {
+/* Аппаратный курсор VGA — тонкая подчёркнутая полоска (сканлайны 14-15),
+   чтобы не перекрывать символ. */
+static void vga_cursor_underline(void) {
     if (use_fb) return;
     outb(0x3D4, 0x0A);
-    outb(0x3D5, 0x00);
+    outb(0x3D5, 0x0E);  /* start scanline = 14 */
     outb(0x3D4, 0x0B);
-    outb(0x3D5, 0x0F);
+    outb(0x3D5, 0x0F);  /* end scanline = 15 */
 }
 
 static void backend_draw_cell(size_t row, size_t col, uint16_t entry) {
@@ -125,8 +125,9 @@ static void set_cell(size_t row, size_t col, char c, uint8_t color) {
     paint_cell(row, col);
 }
 
-/* Программный мигающий курсор (работает и в text, и в framebuffer).
-   Показывает инверсию ячейки на позиции ввода. */
+/* Программный мигающий курсор: тонкая подчёркнутая полоска.
+   В FB — линия по низу ячейки; в VGA text — инверсия цветов символа.
+   cells[][] НЕ трогаем — там истинный контент; при восстановлении перерисовываем из него. */
 static bool   g_cursor_on     = true;
 static bool   g_cursor_painted = false;
 static size_t g_cursor_prow   = 0;
@@ -134,22 +135,22 @@ static size_t g_cursor_pcol   = 0;
 
 static void term_draw_cursor_at(size_t row, size_t col) {
     if (row >= term_rows || col >= term_cols) return;
-    /* Яркий блочный курсор. cells[][] НЕ трогаем — там истинный контент;
-       в текстовом режиме пишем блок напрямую в VGA-память. */
     if (use_fb) {
-        fb_fill_block(col, row, 0x0F);
+        fb_draw_cursor_line(col, row);
     } else {
-        if (row >= 25 || col >= 80) return;
-        size_t idx = row * 80 + col;
-        VGA_MEMORY_PTR[idx * 2] = 0xDB;
-        VGA_MEMORY_PTR[idx * 2 + 1] = 0x0F;
+        /* VGA text mode — инверсия цветов символа (symbol stays visible). */
+        uint16_t e = cells[row][col];
+        uint8_t attr = (uint8_t)(e >> 8);
+        uint8_t fg = attr & 0x07;
+        uint8_t bg = (attr >> 4) & 0x07;
+        uint8_t inv = (uint8_t)((fg << 4) | (bg & 0x07) | (attr & 0x80));
+        backend_draw_cell(row, col, (uint16_t)(e & 0xFF) | ((uint16_t)inv << 8));
     }
 }
 
 static void term_restore_cursor_cell(void) {
     if (!g_cursor_painted) return;
     if (g_cursor_prow >= term_rows || g_cursor_pcol >= term_cols) return;
-    /* Перерисовываем ИСТИННЫЙ контент из cells[][] (курсор их не менял). */
     backend_draw_cell(g_cursor_prow, g_cursor_pcol, cells[g_cursor_prow][g_cursor_pcol]);
 }
 
@@ -413,7 +414,7 @@ void terminal_set_mode(size_t width, size_t height) {
         term_rows = height;
     }
     recompute_layout();
-    if (!use_fb) vga_cursor_block();
+    if (!use_fb) vga_cursor_underline();
     /* Очищаем ВСЮ физическую сетку: иначе старый статус-бар остаётся ниже
        новой (меньшей) контентной области. set_cell() тут не годится — он
        отсекает строки >= нового term_rows. */
@@ -480,7 +481,7 @@ void terminal_initialize() {
     header_enabled = true;
     status_enabled = true;
     recompute_layout();
-    vga_cursor_block();
+    vga_cursor_underline();
     status_left[0] = 0;
     status_mid[0] = 0;
     status_right[0] = 0;
