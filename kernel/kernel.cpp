@@ -4459,7 +4459,7 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
 
             char list_buf[1024];
             static char file_matches[48][128];
-            if (fs_list_dir(dir_path, list_buf, sizeof(list_buf)) < 0) return;
+            if (vfs_list(dir_path, list_buf, sizeof(list_buf)) < 0) return;
 
             auto path_join = [&](char* out, size_t out_sz, const char* dir, const char* name,
                                  size_t name_len, bool is_dir) {
