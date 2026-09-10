@@ -657,22 +657,26 @@ const char* task_getcwd(void) {
 
 int task_chdir(const char* path) {
     if (!g_current || !path || !path[0]) return -1;
+    char abs[TASK_CWD_MAX];
     if (path[0] == '/') {
-        task_copy_str(g_current->cwd, TASK_CWD_MAX, path);
-        return 0;
+        task_copy_str(abs, TASK_CWD_MAX, path);
+    } else {
+        size_t p = 0;
+        const char* cwd = g_current->cwd;
+        while (cwd[p] && p + 1 < TASK_CWD_MAX) {
+            abs[p] = cwd[p];
+            p++;
+        }
+        if (p > 0 && abs[p - 1] != '/' && p + 1 < TASK_CWD_MAX) abs[p++] = '/';
+        size_t i = 0;
+        while (path[i] && p + 1 < TASK_CWD_MAX) abs[p++] = path[i++];
+        abs[p] = 0;
     }
-    char tmp[TASK_CWD_MAX];
-    size_t p = 0;
-    const char* cwd = g_current->cwd;
-    while (cwd[p] && p + 1 < TASK_CWD_MAX) {
-        tmp[p] = cwd[p];
-        p++;
-    }
-    if (p > 0 && tmp[p - 1] != '/' && p + 1 < TASK_CWD_MAX) tmp[p++] = '/';
-    size_t i = 0;
-    while (path[i] && p + 1 < TASK_CWD_MAX) tmp[p++] = path[i++];
-    tmp[p] = 0;
-    task_copy_str(g_current->cwd, TASK_CWD_MAX, tmp);
+    /* Проверяем, что каталог существует и является каталогом. */
+    struct fs_stat st;
+    if (vfs_stat(abs, &st) != 0) return -1;
+    if (!(st.flags & FS_FLAG_DIRECTORY)) return -1;
+    task_copy_str(g_current->cwd, TASK_CWD_MAX, abs);
     return 0;
 }
 

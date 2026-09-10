@@ -298,6 +298,26 @@ int vfs_getdents(int tfd, char* buf, size_t size) {
     if (task_fd_get(tfd, &ty, &handle) != 0 || ty != TASK_FD_FILE) return -1;
     if (handle < 0 || !g_ofiles[handle].used || !g_ofiles[handle].is_dir) return -1;
     if (!buf || size < 2) return -1;
+    if (g_ofiles[handle].fs_type == FS_TYPE_RAMFS) {
+        char listing[512];
+        int ln = ramfs_list(g_ofiles[handle].path, listing, sizeof(listing));
+        if (ln <= 0) return 0;
+        uint32_t off = g_ofiles[handle].offset;
+        char* p = listing;
+        for (uint32_t i = 0; i < off; i++) {
+            while (*p && *p != '\n') p++;
+            if (*p == '\n') p++;
+            if (!*p) return 0;
+        }
+        char* e = p;
+        while (*e && *e != '\n') e++;
+        size_t n = (size_t)(e - p);
+        if (n + 1 > size) n = size - 1;
+        for (size_t i = 0; i < n; i++) buf[i] = p[i];
+        buf[n] = 0;
+        g_ofiles[handle].offset = off + 1;
+        return (int)(n + 1);
+    }
     char name[FS_FILENAME_LEN];
     uint32_t ino = 0;
     int got = fs_readdir(g_ofiles[handle].path, &g_ofiles[handle].offset, name, sizeof(name), &ino);
