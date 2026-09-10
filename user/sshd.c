@@ -117,6 +117,8 @@ static uint32_t g_chan; /* client channel id */
 static uint8_t g_pending[2048];
 static uint32_t g_pending_len;
 static int g_has_pending;
+static char g_user[64];
+static uint16_t g_shell_uid;
 
 /* chacha20-poly1305@openssh.com */
 /* OpenSSH chacha uses a 64-bit counter + 64-bit nonce; mapped onto the
@@ -369,6 +371,15 @@ static int do_userauth(void) {
     /* USERAUTH_REQUEST: accept any method (none/password/publickey) */
     rr = ssh_recv(pkt, &plen);
     if (rr < 0 || pkt[0] != MSG_USERAUTH_REQUEST) return -1;
+    {
+        struct br ur; ur.p = pkt; ur.len = plen; ur.pos = 1;
+        uint32_t un = br_u32(&ur);
+        const uint8_t* user = br_raw(&ur, un);
+        uint32_t ul = un < sizeof(g_user) - 1 ? un : (uint32_t)sizeof(g_user) - 1;
+        memcpy(g_user, user, ul);
+        g_user[ul] = 0;
+        g_shell_uid = (ul == 4 && memcmp(g_user, "root", 4) == 0) ? 0 : 1000;
+    }
     uint8_t ok[1] = { MSG_USERAUTH_SUCCESS };
     if (ssh_send(ok, 1) < 0) return -1;
 
@@ -403,6 +414,8 @@ static int start_shell(void) {
         sys_dup2(slave, 2);
         if (slave > 2) sys_close(slave);
         if (master > 2) sys_close(master);
+        if (g_shell_uid != 0) sys_setuid(g_shell_uid);
+        sys_chdir(g_shell_uid == 0 ? "/root" : "/");
         char* av[2];
         av[0] = (char*)"/tmp/sh.elf";
         av[1] = 0;
@@ -473,6 +486,8 @@ static int start_exec(const char* cmd) {
         sys_dup2(slave, 2);
         if (slave > 2) sys_close(slave);
         if (master > 2) sys_close(master);
+        if (g_shell_uid != 0) sys_setuid(g_shell_uid);
+        sys_chdir(g_shell_uid == 0 ? "/root" : "/");
         char* av[2];
         av[0] = (char*)"/tmp/sh.elf";
         av[1] = 0;

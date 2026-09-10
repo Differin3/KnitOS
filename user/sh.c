@@ -56,7 +56,7 @@ static void run_builtin(char** argv, int* handled) {
     if (!strcmp(argv[0], "exit")) {
         sys_exit(0);
     } else if (!strcmp(argv[0], "cd")) {
-        const char* d = argv[1] ? argv[1] : "/";
+        const char* d = argv[1] ? argv[1] : (sys_getuid() == 0 ? "/root" : "/");
         if (sys_chdir(d) < 0) printf("sh: cd: %s: no such dir\n", d);
     } else if (!strcmp(argv[0], "pwd")) {
         char cwd[160];
@@ -67,8 +67,10 @@ static void run_builtin(char** argv, int* handled) {
             printf("%s", argv[i]);
         }
         putchar('\n');
+    } else if (!strcmp(argv[0], "id")) {
+        printf("uid=%d gid=%d\n", (int)sys_getuid(), (int)sys_getgid());
     } else if (!strcmp(argv[0], "help")) {
-        printf("builtins: cd pwd echo exit help\n");
+        printf("builtins: cd pwd echo id exit help\n");
     } else {
         *handled = 0;
     }

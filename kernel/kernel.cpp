@@ -2387,7 +2387,12 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
                 terminal_writestring("\nNo embedded user program");
                 flush_line(); return;
             }
-            int tid = task_spawn_user((const uint8_t*)start, sz, name);
+            /* Серверные приложения запускаем от root (uid 0). */
+            uint16_t spawn_uid = 1000;
+            if ((which[0]=='s'&&which[1]=='s'&&which[2]=='h'&&which[3]=='d') ||
+                (which[0]=='k'&&which[1]=='s'&&which[2]=='s'&&which[3]=='h'&&which[4]=='d'))
+                spawn_uid = 0;
+            int tid = task_spawn_user_uid((const uint8_t*)start, sz, name, spawn_uid);
             terminal_writestring("\nSpawned user task");
             if (tid >= 0) {
                 char tbuf[12]; int tp = 0;

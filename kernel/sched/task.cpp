@@ -149,7 +149,7 @@ static void user_task_trampoline(void* arg);
 #define USER_STACK_SLOT_STEP  0x00400000u
 #define TASK_UID_USER         1000
 
-int task_spawn_user(const uint8_t* elf_img, size_t elf_len, const char* name) {
+int task_spawn_user_uid(const uint8_t* elf_img, size_t elf_len, const char* name, uint16_t uid) {
     if (!g_sched_ready || !elf_img || elf_len < 16) return -1;
 
     uint32_t entry = 0;
@@ -182,7 +182,8 @@ int task_spawn_user(const uint8_t* elf_img, size_t elf_len, const char* name) {
     t->user_entry = entry;
     t->user_stack = user_stack_alloc();
     t->kstack_top = (uint32_t)(kstack + TASK_STACK_SIZE);
-    t->uid = TASK_UID_USER;
+    t->uid = uid;
+    t->gid = uid;
     task_copy_name(t->name, name ? name : "user");
     if (g_current) task_copy_str(t->cwd, TASK_CWD_MAX, g_current->cwd);
     else {
@@ -209,6 +210,10 @@ int task_spawn_user(const uint8_t* elf_img, size_t elf_len, const char* name) {
     log_fmt3(LOG_INFO, "sched", "spawn_user", "id", (uint32_t)t->id,
              "entry", entry, "stack", t->user_stack);
     return t->id;
+}
+
+int task_spawn_user(const uint8_t* elf_img, size_t elf_len, const char* name) {
+    return task_spawn_user_uid(elf_img, elf_len, name, TASK_UID_USER);
 }
 
 static const char* task_path_base(const char* path) {
