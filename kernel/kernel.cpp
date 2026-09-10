@@ -479,6 +479,7 @@ static void boot_populate_user_bins(void) {
     extern char user_argtest_start[], user_argtest_end[];
     extern char user_ptytest_start[], user_ptytest_end[];
     extern char user_sh_start[], user_sh_end[];
+    extern char user_ksshd_start[], user_ksshd_end[];
     static const struct {
         const char* path;
         char* start;
@@ -491,6 +492,7 @@ static void boot_populate_user_bins(void) {
         { "/tmp/argtest.elf",   user_argtest_start, user_argtest_end },
         { "/tmp/ptytest.elf",   user_ptytest_start, user_ptytest_end },
         { "/tmp/sh.elf",        user_sh_start,      user_sh_end },
+        { "/tmp/ksshd.elf",     user_ksshd_start,   user_ksshd_end },
     };
     for (unsigned i = 0; i < sizeof(bins) / sizeof(bins[0]); i++) {
         size_t sz = (size_t)(bins[i].end - bins[i].start);
@@ -2341,6 +2343,7 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
             extern char user_launcher_start[], user_launcher_end[];
             extern char user_argtest_start[], user_argtest_end[];
             extern char user_httpd_start[], user_httpd_end[];
+            extern char user_ksshd_start[], user_ksshd_end[];
             const char* arg = cmd + 7;
             const char* which = 0;
             char* start = 0;
@@ -2365,9 +2368,12 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
             } else if (alen >= 5 && arg[0]=='h'&&arg[1]=='t'&&arg[2]=='t'&&arg[3]=='p'&&arg[4]=='d') {
                 which = "httpd";
                 start = user_httpd_start; end = user_httpd_end; name = "httpd";
+            } else if (alen >= 5 && arg[0]=='k'&&arg[1]=='s'&&arg[2]=='s'&&arg[3]=='h'&&arg[4]=='d') {
+                which = "ksshd";
+                start = user_ksshd_start; end = user_ksshd_end; name = "ksshd";
             }
             if (!which) {
-                terminal_writestring("\nUsage: runelf hello|demo2|demo3|launcher|argtest|httpd");
+                terminal_writestring("\nUsage: runelf hello|demo2|demo3|launcher|argtest|httpd|ksshd");
                 flush_line(); return;
             }
             size_t sz = (size_t)(end - start);

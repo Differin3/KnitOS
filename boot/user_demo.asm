@@ -25,6 +25,9 @@ global user_httpd_size
 global user_sh_start
 global user_sh_end
 global user_sh_size
+global user_ksshd_start
+global user_ksshd_end
+global user_ksshd_size
 
 user_demo_start:
     incbin "user/hello.elf"
@@ -73,3 +76,9 @@ user_sh_start:
 user_sh_end:
 user_sh_size:
     dd user_sh_end - user_sh_start
+
+user_ksshd_start:
+    incbin "user/ksshd.elf"
+user_ksshd_end:
+user_ksshd_size:
+    dd user_ksshd_end - user_ksshd_start
