@@ -467,9 +467,9 @@ extern "C" int syscall_handler(struct syscall_args* args, uint32_t caller_cs) {
                 return -1;
             static uint8_t in1[2048];
             static uint8_t in2[2048];
-            static uint8_t in3[256];
-            static uint8_t in4[1024 + 16];
-            static uint8_t outb[1024 + 16];
+            static uint8_t in3[4096];
+            static uint8_t in4[4096];
+            static uint8_t outb[4096];
             switch (req.op) {
             case KC_SHA256: {
                 if (req.in1_len > sizeof(in1)) return -1;

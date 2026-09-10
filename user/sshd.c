@@ -114,6 +114,7 @@ static uint32_t g_seq_in, g_seq_out;
 static int g_encrypted;
 static uint8_t g_key_c2s[64], g_key_s2c[64];
 static uint32_t g_chan; /* client channel id */
+static uint32_t g_maxpkt = 32768;
 static uint8_t g_pending[2048];
 static uint32_t g_pending_len;
 static int g_has_pending;
@@ -503,7 +504,9 @@ static int start_shell(void) {
         /* master -> client (CHANNEL_DATA) */
         for (;;) {
             char data[1024];
-            long r = sys_read(master, data, sizeof(data));
+            uint32_t lim = sizeof(data);
+            if (g_maxpkt > 16 && g_maxpkt - 16 < lim) lim = g_maxpkt - 16;
+            long r = sys_read(master, data, lim);
             if (r <= 0) break;
             uint8_t p[1100]; struct buf b; b.p = p; b.len = 0; b.cap = sizeof(p);
             bw_u8(&b, MSG_CHANNEL_DATA);
@@ -534,8 +537,7 @@ static int start_shell(void) {
         } else if (t == MSG_CHANNEL_WINDOW_ADJUST) {
             /* ignore */
         } else if (t == MSG_GLOBAL_REQUEST) {
-            uint8_t p[16]; struct buf b; b.p = p; b.len = 0; b.cap = sizeof(p);
-            bw_u8(&b, MSG_REQUEST_FAILURE); ssh_send(p, b.len);
+            /* ignore: only the relay child may send s2c packets (shared seq) */
         } else if (t == MSG_DISCONNECT) {
             break;
         }
@@ -575,7 +577,9 @@ static int start_exec(const char* cmd) {
     uint64_t sc = 0;
     for (;;) {
         char data[1024];
-        long r = sys_read(master, data, sizeof(data));
+        uint32_t lim = sizeof(data);
+        if (g_maxpkt > 16 && g_maxpkt - 16 < lim) lim = g_maxpkt - 16;
+        long r = sys_read(master, data, lim);
         if (r <= 0) break;
         uint8_t p[1100]; struct buf b; b.p = p; b.len = 0; b.cap = sizeof(p);
         bw_u8(&b, MSG_CHANNEL_DATA);
@@ -583,7 +587,6 @@ static int start_exec(const char* cmd) {
         bw_str(&b, data, (uint32_t)r);
         if (ssh_send(p, b.len) < 0) break;
     }
-    /* exit-status (RFC 4254 6.10) */
     {
         uint8_t es[64]; struct buf eb; eb.p = es; eb.len = 0; eb.cap = sizeof(es);
         bw_u8(&eb, MSG_CHANNEL_REQUEST);
@@ -620,7 +623,8 @@ static int do_connection(void) {
     g_chan = br_u32(&r);
     uint32_t win = br_u32(&r);
     uint32_t maxpkt = br_u32(&r);
-    (void)win; (void)maxpkt;
+    (void)win;
+    if (maxpkt >= 64 && maxpkt < g_maxpkt) g_maxpkt = maxpkt;
 
     uint8_t p[64]; struct buf b; b.p = p; b.len = 0; b.cap = sizeof(p);
     bw_u8(&b, MSG_CHANNEL_OPEN_CONFIRMATION);

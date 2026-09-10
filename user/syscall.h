@@ -90,6 +90,7 @@ struct kcrypto_req {
 #define O_TRUNC   0x0200
 #define O_APPEND  0x0400
 #define O_EXCL    0x0800
+#define O_DIRECTORY 0x1000
 
 #define AF_INET   2
 #define SOCK_STREAM 1
@@ -153,6 +154,9 @@ static inline long sys_close(long fd) {
 }
 static inline long sys_lseek(long fd, long off, int whence) {
     return syscall5(SYS_LSEEK, (uint32_t)fd, (uint32_t)off, (uint32_t)whence, 0);
+}
+static inline long sys_getdents(long fd, void* buf, unsigned long n) {
+    return syscall4(SYS_GETDENTS, (uint32_t)fd, (uint32_t)(unsigned long)buf, (uint32_t)n);
 }
 static inline long sys_stat(const char* path, struct stat* st) {
     return syscall3(SYS_STAT, (uint32_t)(unsigned long)path, (uint32_t)(unsigned long)st);

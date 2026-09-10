@@ -69,8 +69,28 @@ static void run_builtin(char** argv, int* handled) {
         putchar('\n');
     } else if (!strcmp(argv[0], "id")) {
         printf("uid=%d gid=%d\n", (int)sys_getuid(), (int)sys_getgid());
+    } else if (!strcmp(argv[0], "ls")) {
+        char cwdbuf[128];
+        const char* d = argv[1];
+        if (!d) { if (sys_getcwd(cwdbuf, sizeof(cwdbuf)) < 0) cwdbuf[0] = 0; d = cwdbuf; }
+        int fd = (int)sys_open(d, O_RDONLY | O_DIRECTORY, 0);
+        if (fd < 0) { printf("ls: %s: no such directory\n", d); return; }
+        char name[128];
+        long n;
+        while ((n = sys_getdents(fd, name, sizeof(name))) > 0) {
+            printf("%s\n", name);
+        }
+        sys_close(fd);
+    } else if (!strcmp(argv[0], "cat")) {
+        if (!argv[1]) { printf("cat: usage: cat <file>\n"); return; }
+        int fd = (int)sys_open(argv[1], O_RDONLY, 0);
+        if (fd < 0) { printf("cat: %s: no such file\n", argv[1]); return; }
+        char buf[512];
+        long n;
+        while ((n = sys_read(fd, buf, sizeof(buf))) > 0) sys_write(1, buf, (unsigned long)n);
+        sys_close(fd);
     } else if (!strcmp(argv[0], "help")) {
-        printf("builtins: cd pwd echo id exit help\n");
+        printf("builtins: cd pwd ls cat echo id exit help\n");
     } else {
         *handled = 0;
     }
@@ -87,7 +107,11 @@ int main(int argc, char** argv) {
     (void)argc;
     (void)argv;
     for (;;) {
-        printf("sh> ");
+        char cwd[128];
+        if (sys_getcwd(cwd, sizeof(cwd)) < 0) cwd[0] = 0;
+        const char* who = sys_getuid() == 0 ? "root" : "user";
+        const char* sig = sys_getuid() == 0 ? "#" : "$";
+        printf("%s@knitos:%s%s ", who, cwd, sig);
         int n = read_line(g_line, sizeof(g_line));
         if (n == -2) { printf("\n"); break; }
         if (n <= 0) continue;
