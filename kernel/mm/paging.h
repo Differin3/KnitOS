@@ -17,6 +17,8 @@ uint32_t paging_clone_dir(uint32_t src_cr3);
 /* Глубокий клон: user-PDE копируются в новые физические 4MB-кадры
    (неидентичное отображение), чтобы процессы не делили память. */
 uint32_t paging_clone_dir_deep(uint32_t src_cr3);
+/* Освобождает физические кадры всех user-PDE (для exec/выхода). */
+void paging_free_user_frames(uint32_t cr3);
 void paging_free_dir(uint32_t cr3);
 
 /* Пометить один 4MB PDE как user-доступный в указанном каталоге (для сегментов

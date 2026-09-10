@@ -260,7 +260,9 @@ int task_exec_user_argv(const char* path, int argc, const char* const* argv) {
     free(elf);
 
     /* Снимаем старый user-доступ во всей области ELF, затем включаем
-       только под новый образ и новый стек. Физические страницы не трогаем. */
+       только под новый образ и новый стек. Освобождаем физические кадры
+       старых PDE (иначе при каждом exec утекает fork-пул). */
+    paging_free_user_frames(t->cr3);
     for (uint32_t va = ELF_USER_VA_MIN; va < ELF_USER_VA_MAX; va += USER_STACK_SLOT_STEP) {
         paging_clear_user_pde(t->cr3, va >> 22);
     }
@@ -1008,12 +1010,33 @@ enum task_state task_get_state(int id) {
     return t->state;
 }
 
+static void task_kill_children(int pid) {
+    for (int i = 0; i < TASK_MAX; i++) {
+        struct task* c = &g_tasks[i];
+        if (c->state == TASK_UNUSED || c->state == TASK_ZOMBIE) continue;
+        if (c->parent_pid == pid) {
+            task_kill_children(c->id);
+            if (c != g_current) {
+                task_resources_cleanup(c->id);
+                c->state = TASK_ZOMBIE;
+                c->entry = 0;
+                c->wake_ms = 0;
+                c->wait_reason = WAIT_NONE;
+            }
+        }
+    }
+}
+
 int task_kill(int id) {
     if (!g_sched_ready) return -1;
     struct task* t = task_find_by_id(id);
     if (!t) return -1;
     if (t->id == TASK_PID_SYSTEMD || t->is_idle) return -2;
     if (t->state == TASK_ZOMBIE) return 0;
+
+    /* Убиваем потомков, чтобы не осиротели и не утекали ресурсы
+       (deep-copy кадры fork-пула и т.д.). */
+    task_kill_children(id);
 
     task_resources_cleanup(id);
 

@@ -295,6 +295,19 @@ void paging_free_dir(uint32_t cr3) {
     }
 }
 
+/* Освобождает физические кадры всех user-PDE, не трогая сам каталог.
+   Используется при exec (замена образа) и при выходе задачи. */
+void paging_free_user_frames(uint32_t cr3) {
+    uint32_t* dir = paging_dir_ptr(cr3);
+    if (!dir) return;
+    for (int i = 0; i < PAGE_DIR_ENTRIES; i++) {
+        uint32_t e = dir[i];
+        if ((e & PDE_PRESENT) && (e & PDE_USER) && (e & PDE_PSE)) {
+            fork_frame_free(e & 0xFFC00000u);
+        }
+    }
+}
+
 void paging_unmap_pde(uint32_t cr3, uint32_t pde_index) {
     uint32_t* dir = paging_dir_ptr(cr3);
     if (!dir || pde_index >= PAGE_DIR_ENTRIES) return;
