@@ -64,4 +64,7 @@ void terminal_editor_print_at(size_t row, size_t col, const char* s, uint8_t col
 void terminal_editor_clear_row(size_t row, uint8_t color);
 void terminal_editor_show_cursor(size_t row, size_t col);
 
+/* Blink the software cursor (call periodically with monotonic ms). */
+void terminal_cursor_tick(uint32_t now_ms);
+
 #endif

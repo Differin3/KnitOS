@@ -375,6 +375,13 @@ extern "C" int syscall_handler(struct syscall_args* args, uint32_t caller_cs) {
         case SYS_SLEEP:
             task_sleep_ms((uint32_t)args->arg1);
             return 0;
+        case SYS_EXEC: {
+            char path[256];
+            if (user_str_copy(path, sizeof(path), (const char*)args->arg1, caller_cs, usermax) != 0)
+                return -1;
+            /* Успешный exec не возвращается — продолжение в ring3 с новым образом. */
+            return task_exec_user(path);
+        }
         case SYS_EXIT:
             task_exit();
             return 0;

@@ -246,6 +246,21 @@ void fb_fill_cell(size_t cell_x, size_t cell_y, uint8_t vga_color) {
     fb_draw_glyph(cell_x, cell_y, ' ', vga_color);
 }
 
+/* Плотная заливка всей ячейки цветом fg — используется для мигающего курсора. */
+void fb_fill_block(size_t cell_x, size_t cell_y, uint8_t vga_color) {
+    if (!g_fb.active) return;
+    uint8_t s = g_fb.scale ? g_fb.scale : 1;
+    uint32_t cw = (uint32_t)FB_FONT_W * s;
+    uint32_t ch = (uint32_t)FB_FONT_H * s;
+    uint32_t px = g_fb.origin_x + (uint32_t)cell_x * cw;
+    uint32_t py = g_fb.origin_y + (uint32_t)cell_y * ch;
+    if (px + cw > g_fb.width || py + ch > g_fb.height) return;
+    uint32_t fg = vga_to_rgb(vga_color & 0x0F);
+    for (uint32_t y = py; y < py + ch; y++)
+        for (uint32_t x = px; x < px + cw; x++)
+            fb_put_pixel(x, y, fg);
+}
+
 void fb_scroll_cells_up(size_t cell_row0, size_t cell_rows, size_t cell_cols,
                         size_t lines, uint8_t fill_vga) {
     if (!g_fb.active || cell_rows < 2 || lines == 0) return;
@@ -309,9 +324,9 @@ void fb_draw_glyph(size_t cell_x, size_t cell_y, char c, uint8_t vga_color) {
                 uint32_t color = (bits & (0x80 >> col)) ? fg : bg;
                 uint32_t bx = px + (uint32_t)col * s;
                 uint32_t by = py + (uint32_t)(row * 2 + dy) * s;
-                for (uint8_t sy = 0; sy < s; sy++)
-                    for (uint8_t sx = 0; sx < s; sx++)
-                        fb_put_pixel(bx + sx, by + sy, color);
+            for (uint8_t sy = 0; sy < s; sy++)
+                for (uint8_t sx = 0; sx < s; sx++)
+                    fb_put_pixel(bx + sx, by + sy, color);
             }
         }
     }

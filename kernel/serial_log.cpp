@@ -3,10 +3,24 @@
 #define COM1_DATA   0x3F8
 #define COM1_STATUS 0x3FD
 
-static int g_log_level = LOG_DBG;
+/* Логи по умолчанию отключены: serial-консоль показывает только зеркало
+   VGA-терминала (промпт, echo ввода, вывод команд). Включить: log info|debug|err. */
+static int g_log_level = LOG_OFF;
 static bool g_mirror = true;
 static bool g_mirror_input = false;
 static int g_telnet_skip = 0;
+
+/* Состояние парсера ESC-последовательностей (стрелки/Home/End/Delete).
+ *  0 = нет, 1 = ESC получен, 2 = ESC[ получен, 3-6 = ожидание '~' */
+static int g_esc_state = 0;
+
+#define KEY_UP      0x80
+#define KEY_DOWN    0x81
+#define KEY_LEFT    0x82
+#define KEY_RIGHT   0x83
+#define KEY_HOME    0x86
+#define KEY_END     0x87
+#define KEY_DELETE  0x89
 
 static inline uint8_t ser_inb(uint16_t port) {
     uint8_t v;
@@ -85,7 +99,9 @@ void serial_init(void) {
     ser_outb(0x3F9, 0x00);
     ser_outb(0x3FB, 0x03);
     ser_outb(0x3FC, 0x00);
-    ser_puts("[INF][serial] mirror enabled -> logs/qemu-serial.log\n");
+    if (g_log_level >= LOG_INFO) {
+        ser_puts("[INF][serial] mirror enabled -> logs/qemu-serial.log\n");
+    }
 }
 
 void log_mirror_set(bool enabled) {
@@ -102,10 +118,17 @@ void log_mirror_set_input(bool is_user_typing) {
 
 void log_mirror_char(char c) {
     if (!g_mirror || g_mirror_input) return;
-    if (c == '\b') return;
+    if (c == '\b') {
+        ser_putchar('\b');
+        return;
+    }
     if (c == '\n') {
         ser_putchar('\r');
         ser_putchar('\n');
+        return;
+    }
+    if (c == '\r') {
+        ser_putchar('\r');
         return;
     }
     if (c == '\t' || (c >= 32 && c < 127)) {
@@ -114,7 +137,7 @@ void log_mirror_char(char c) {
 }
 
 void log_shell_cmd(const char* cwd, const char* cmd, size_t len) {
-    if (!g_mirror) return;
+    if (!g_mirror || g_log_level < LOG_INFO) return;
     ser_puts("[CMD] ");
     if (cwd && cwd[0]) {
         ser_puts(cwd);
@@ -131,6 +154,7 @@ void log_shell_cmd(const char* cwd, const char* cmd, size_t len) {
 }
 
 void log_driver_event(const char* name, const char* event) {
+    if (g_log_level < LOG_INFO) return;
     ser_puts("[DRV][");
     ser_puts(name ? name : "?");
     ser_puts("] ");
@@ -219,12 +243,68 @@ char serial_poll_char(void) {
         g_telnet_skip = 2;
         return 0;
     }
+
+    /* Enter (CR) должен выполнить команду, поэтому раньше Ctrl+key ветки
+       преобразуем его в LF как при обычном пере вода строки. */
     if (b == '\r') {
+        g_esc_state = 0;
         return '\n';
     }
-    if (b == 127 || b == 8) {
-        return '\b';
+
+    /* Ctrl+key: 1-26 → специальные коды для shell (Ctrl+A..Ctrl+Z) */
+    if (b >= 1 && b <= 26) {
+        g_esc_state = 0;
+        return (char)b; /* shell распознаёт Ctrl+C=3, Ctrl+U=21, Ctrl+A=1, Ctrl+E=5 и т.д. */
     }
+
+    /* Парсер ESC-последовательностей: ESC [ A/B/C/D, ESC [ H/F, ESC [ 2~ (DEL), ESC [ 3~ (DEL) */
+    if (g_esc_state == 1) {
+        if (b == '[') {
+            g_esc_state = 2;
+            return 0;
+        }
+        g_esc_state = 0;
+        return 0; /* ESC-однобайтный (Alt) — игнорируем */
+    }
+    if (g_esc_state == 2) {
+        g_esc_state = 0;
+        switch (b) {
+            case 'A': return KEY_UP;
+            case 'B': return KEY_DOWN;
+            case 'C': return KEY_RIGHT;
+            case 'D': return KEY_LEFT;
+            case 'H': return KEY_HOME;
+            case 'F': return KEY_END;
+            case '2': g_esc_state = 3; return 0; /* ожидаем ~ */
+            case '3': g_esc_state = 4; return 0;
+            case '1': g_esc_state = 5; return 0;
+            case '4': g_esc_state = 6; return 0;
+            default:  return 0;
+        }
+    }
+    if (g_esc_state >= 3 && g_esc_state <= 6) {
+        if (b == '~') {
+            int key = 0;
+            switch (g_esc_state) {
+                case 3: key = KEY_DELETE; break; /* ESC [ 2~ */
+                case 4: key = KEY_DELETE; break; /* ESC [ 3~ */
+                case 5: key = KEY_HOME;   break; /* ESC [ 1~ */
+                case 6: key = KEY_END;    break; /* ESC [ 4~ */
+            }
+            g_esc_state = 0;
+            return (char)key;
+        }
+        g_esc_state = 0;
+        return 0;
+    }
+
+    /* Начало ESC-последовательности */
+    if (b == 0x1B) {
+        g_esc_state = 1;
+        return 0;
+    }
+
+    if (b == 127 || b == 8) return '\b';
     if (b == '\n' || b == '\t' || (b >= 32 && b < 127)) {
         return (char)b;
     }

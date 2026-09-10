@@ -16,6 +16,7 @@ typedef unsigned long size_t;
 #define SYS_GETCWD      33
 #define SYS_CHDIR       34
 #define SYS_SLEEP       35
+#define SYS_EXEC        36
 
 #define O_RDONLY  0x0001
 #define O_WRONLY  0x0002
@@ -69,6 +70,9 @@ static inline long sys_getcwd(char* buf, unsigned long cap) {
 }
 static inline long sys_chdir(const char* path) {
     return syscall2(SYS_CHDIR, (uint32_t)(unsigned long)path);
+}
+static inline long sys_exec(const char* path) {
+    return syscall2(SYS_EXEC, (uint32_t)(unsigned long)path);
 }
 
 #endif

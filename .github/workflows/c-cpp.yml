@@ -1,23 +1,57 @@
-name: C/C++ CI
+name: CI
 
 on:
   push:
     branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
+  workflow_dispatch:
 
 jobs:
   build:
-
+    name: Build kernel + ISO
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
-    - name: configure
-      run: ./configure
-    - name: make
-      run: make
-    - name: make check
-      run: make check
-    - name: make distcheck
-      run: make distcheck
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            nasm \
+            gcc-multilib g++-multilib \
+            binutils \
+            grub-pc-bin grub-common \
+            xorriso mtools \
+            make
+
+      - name: Show versions
+        run: |
+          nasm -v
+          gcc --version | head -1
+          grub-mkrescue --version
+          xorriso --version | head -1
+
+      - name: Clean build
+        run: make clean && make -j"$(nproc)"
+
+      - name: Verify artifacts
+        run: |
+          set -e
+          test -s iso/boot/kernel.bin || { echo "::error::iso/boot/kernel.bin missing"; exit 1; }
+          test -s myos.iso          || { echo "::error::myos.iso missing"; exit 1; }
+          echo "kernel.bin: $(stat -c%s iso/boot/kernel.bin) bytes"
+          echo "myos.iso:   $(stat -c%s myos.iso) bytes"
+          grub-file --is-x86-multiboot2 iso/boot/kernel.bin \
+            && echo "Multiboot2 header: OK" \
+            || echo "::warning::kernel.bin is not a Multiboot2 image"
+
+      - name: Upload ISO
+        uses: actions/upload-artifact@v4
+        with:
+          name: myos-iso
+          path: myos.iso
+          if-no-files-found: error
+          retention-days: 14

@@ -30,6 +30,7 @@ static bool fs_initialized = false;
 static uint8_t* bitmap = NULL;
 static uint32_t bitmap_sectors = 0;
 static uint16_t g_uid = 0;
+static uint16_t g_gid = 0;
 static uint32_t blocks_used_uid0 = 0;
 
 static int d_read(uint32_t lba, void* buf) { return fs_cache_read_sector(lba, buf); }
@@ -62,6 +63,15 @@ uint16_t fs_current_uid(void) {
     return g_uid;
 }
 void fs_set_current_uid(uint16_t uid) { g_uid = uid; }
+
+uint16_t fs_current_gid(void) {
+    if (sched_ready()) {
+        struct task* cur = sched_current();
+        if (cur) return cur->gid;
+    }
+    return g_gid;
+}
+void fs_set_current_gid(uint16_t gid) { g_gid = gid; }
 
 static uint32_t fs_inode_sectors(void) {
     uint32_t slots = boot_sector.inode_slots ? boot_sector.inode_slots : FS_MAX_INODES;
@@ -142,7 +152,7 @@ int fs_recover(void) {
     }
     uint32_t expect = fs_csum32(&hdr->magic, sizeof(uint32_t) * (2 + hdr->nsec));
     if (expect != hdr->csum) {
-        log_msg(LOG_ERR, "fs", "journal csum fail — discard");
+        log_msg(LOG_ERR, "fs", "journal csum fail - discard");
         boot_sector.log_next = 0;
         d_write(0, &boot_sector);
         return 0;
@@ -455,7 +465,7 @@ static int dirent_next(uint32_t off, uint32_t size, const uint8_t* blob,
 }
 
 static int dir_find_name(int dir_ino, const char* name, uint32_t* off_out) {
-    if (dir_ino < 0 || !(inodes[dir_ino].flags & FS_FLAG_DIRECTORY)) return -1;
+    if (dir_ino <= 0 || dir_ino >= (int)FS_MAX_INODES || !(inodes[dir_ino].flags & FS_FLAG_DIRECTORY)) return -1;
     uint32_t size = dir_logical_size(dir_ino);
     if (size == 0) return -1;
     uint8_t* blob = (uint8_t*)malloc(size);
@@ -649,14 +659,21 @@ const struct fs_inode* fs_entry_at(int idx) {
 int fs_access_ok(int idx, int want_write) {
     if (idx <= 0 || idx >= (int)FS_MAX_INODES) return -1;
     if (!(inodes[idx].flags & FS_FLAG_OCCUPIED)) return -1;
-    uint16_t uid = fs_current_uid();
+    uint16_t uid = fs_current_uid();   /* 0 = root (bypass) */
     if (uid == 0) return 0;
+    uint16_t gid = fs_current_gid();
     uint16_t mode = inodes[idx].mode;
     if (inodes[idx].uid == uid) {
         if (want_write) return (mode & 0200) ? 0 : -1;
         return (mode & 0400) ? 0 : -1;
     }
-    if (want_write) return (mode & 0020) ? 0 : -1;
+    /* group membership (основная группа) */
+    if (inodes[idx].gid == gid) {
+        if (want_write) return (mode & 0020) ? 0 : -1;
+        return (mode & 0040) ? 0 : -1;
+    }
+    /* others */
+    if (want_write) return (mode & 0002) ? 0 : -1;
     return (mode & 0004) ? 0 : -1;
 }
 
@@ -678,7 +695,7 @@ int fs_index_stat(int idx, struct fs_stat* st) {
 }
 
 int fs_index_read(int idx, uint32_t offset, void* buffer, size_t size) {
-    if (idx <= 0 || !buffer) return -1;
+    if (idx <= 0 || idx >= (int)FS_MAX_INODES || !buffer) return -1;
     if (!(inodes[idx].flags & FS_FLAG_OCCUPIED)) return -1;
     if (inodes[idx].flags & (FS_FLAG_FIFO | FS_FLAG_SOCK | FS_FLAG_BLK | FS_FLAG_CHR))
         return -1;
@@ -722,7 +739,7 @@ int fs_index_read(int idx, uint32_t offset, void* buffer, size_t size) {
 }
 
 int fs_index_truncate(int idx, uint32_t new_size) {
-    if (idx <= 0) return -1;
+    if (idx <= 0 || idx >= (int)FS_MAX_INODES) return -1;
     if (!(inodes[idx].flags & FS_FLAG_OCCUPIED)) return -1;
     if (fs_access_ok(idx, 1) != 0) return -1;
     if (!bitmap && fs_load_bitmap() != 0) return -1;
@@ -740,7 +757,7 @@ int fs_index_truncate(int idx, uint32_t new_size) {
 }
 
 int fs_index_write(int idx, uint32_t offset, const void* data, size_t size) {
-    if (idx <= 0 || (!data && size)) return -1;
+    if (idx <= 0 || idx >= (int)FS_MAX_INODES || (!data && size)) return -1;
     if (!(inodes[idx].flags & FS_FLAG_OCCUPIED)) return -1;
     if (inodes[idx].flags & (FS_FLAG_FIFO | FS_FLAG_SOCK | FS_FLAG_BLK | FS_FLAG_CHR))
         return -1;
@@ -817,7 +834,7 @@ int fs_create_file(const char* path, uint16_t mode) {
     inodes[idx].flags = FS_FLAG_OCCUPIED;
     inodes[idx].mode = mode ? mode : FS_MODE_FILE;
     inodes[idx].uid = fs_current_uid();
-    inodes[idx].gid = 0;
+    inodes[idx].gid = fs_current_gid();
     inodes[idx].nlink = 1;
     inodes[idx].parent = (uint32_t)parent;
     inodes[idx].atime = inodes[idx].mtime = inodes[idx].ctime = fs_now();
@@ -983,7 +1000,7 @@ int fs_init(int disk_id) {
 
     bool need_create = !fs_layout_valid();
     if (need_create && boot_sector.magic == FS_MAGIC)
-        log_msg(LOG_ERR, "fs", "old/invalid MOS layout — recreating");
+        log_msg(LOG_ERR, "fs", "old/invalid MOS layout - recreating");
 
     if (need_create) {
         log_msg(LOG_INFO, "fs", "create new filesystem v3");
@@ -1194,12 +1211,13 @@ int fs_delete(const char* filename) {
     if (!fs_initialized) return -1;
     int idx = fs_lookup_index(filename, false);
     if (idx < 0 || idx == (int)FS_ROOT_INO) return -1;
-    if (fs_access_ok(idx, 1) != 0) return -1;
-    if ((inodes[idx].flags & FS_FLAG_DIRECTORY) && !dir_is_empty(idx)) return -1;
-
+    /* POSIX: удалить можно, если есть запись в родительском каталоге. */
     int parent;
     char name[FS_FILENAME_LEN];
     if (fs_parent_and_name(filename, &parent, name) != 0) return -1;
+    if (fs_access_ok(parent, 1) != 0) return -1;
+    if ((inodes[idx].flags & FS_FLAG_DIRECTORY) && !dir_is_empty(idx)) return -1;
+
     if (dir_remove_entry(parent, name) != 0) return -1;
 
     if (inodes[idx].nlink > 1) {
@@ -1223,6 +1241,7 @@ int fs_link(const char* oldpath, const char* newpath) {
     int parent;
     char name[FS_FILENAME_LEN];
     if (fs_parent_and_name(newpath, &parent, name) != 0) return -1;
+    if (fs_access_ok(parent, 1) != 0) return -1;
     if (dir_add_entry(parent, (uint32_t)idx, name) != 0) return -1;
     inodes[idx].nlink++;
     inodes[idx].ctime = fs_now();
@@ -1238,6 +1257,9 @@ int fs_rename(const char* old_path, const char* new_path) {
     char old_name[FS_FILENAME_LEN], new_name[FS_FILENAME_LEN];
     if (fs_parent_and_name(old_path, &old_parent, old_name) != 0) return -1;
     if (fs_parent_and_name(new_path, &new_parent, new_name) != 0) return -1;
+    /* Нужна запись в обоих родительских каталогах. */
+    if (fs_access_ok(old_parent, 1) != 0) return -1;
+    if (fs_access_ok(new_parent, 1) != 0) return -1;
     if (dir_add_entry(new_parent, (uint32_t)idx, new_name) != 0) return -1;
     if (dir_remove_entry(old_parent, old_name) != 0) return -1;
     inodes[idx].parent = (uint32_t)new_parent;
@@ -1266,6 +1288,17 @@ int fs_chown(const char* path, uint16_t uid, uint16_t gid) {
     if (idx < 0) return -1;
     if (fs_current_uid() != 0) return -1;
     inodes[idx].uid = uid;
+    inodes[idx].gid = gid;
+    inodes[idx].ctime = fs_now();
+    return fs_persist_meta();
+}
+
+int fs_chgrp(const char* path, uint16_t gid) {
+    int idx = fs_lookup_index(path, false);
+    if (idx < 0) return -1;
+    uint16_t uid = fs_current_uid();
+    /* root или владелец файла */
+    if (uid != 0 && inodes[idx].uid != uid) return -1;
     inodes[idx].gid = gid;
     inodes[idx].ctime = fs_now();
     return fs_persist_meta();
@@ -1369,8 +1402,13 @@ int fs_create_dir(const char* path) {
                 inodes[idx].mode = FS_MODE_DIR;
                 inodes[idx].nlink = 1;
                 inodes[idx].uid = fs_current_uid();
+                inodes[idx].gid = fs_current_gid();
                 inodes[idx].parent = (uint32_t)parent;
                 inodes[idx].atime = inodes[idx].mtime = inodes[idx].ctime = fs_now();
+                if (fs_access_ok(parent, 1) != 0) {
+                    inodes[idx].flags = FS_FLAG_FREE;
+                    return -1;
+                }
                 if (dir_add_entry(parent, (uint32_t)idx, p) != 0) {
                     inodes[idx].flags = FS_FLAG_FREE;
                     return -1;
@@ -1457,6 +1495,7 @@ int fs_getxattr(const char* path, const char* name, void* buf, size_t size) {
     if (d_read(inodes[idx].xattr_lba, sec) != 0) return -1;
     size_t nl = 0;
     while (name[nl]) nl++;
+    if (nl + 1 >= FS_SECTOR_SIZE) return -1;   /* имя не влезает в сектор */
     if (memcmp(sec, name, nl) != 0 || sec[nl] != 0) return -1;
     const uint8_t* v = sec + nl + 1;
     size_t vl = 0;

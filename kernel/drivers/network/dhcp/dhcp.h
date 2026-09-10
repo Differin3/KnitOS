@@ -103,6 +103,12 @@ int dhcp_release();
 // Получить текущее состояние DHCP
 enum dhcp_state dhcp_get_state();
 
+// Получить текущий hostname
+const char* dhcp_get_hostname(void);
+
+// Установить hostname (для DHCP option 12)
+int dhcp_set_hostname(const char* name);
+
 // Принять входящий пакет с dest IP во время DHCP-обмена
 bool dhcp_accepts_dest_ip(uint32_t dest_ip);
 

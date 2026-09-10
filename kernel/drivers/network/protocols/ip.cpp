@@ -21,9 +21,9 @@ struct ip_reass_entry {
     uint16_t id;
     uint8_t protocol;
     uint8_t buffer[IP_REASS_BUF];
-    uint16_t received_len;
-    uint16_t total_len; // 0 until last fragment
-    uint32_t bitmap;    // coarse coverage in 256-byte blocks
+    uint16_t received_len;   /* число реально покрытых байт (без перекрытий) */
+    uint16_t total_len;      /* 0 until last fragment */
+    uint8_t cov[IP_REASS_BUF / 8]; /* карта покрытия: 1 бит на байт */
     uint32_t deadline_ms;
 };
 
@@ -127,9 +127,13 @@ int ip_parse_header(const void* packet, size_t packet_size,
     if (total_len < ihl || total_len > packet_size) return -1;
 
     uint16_t saved_checksum = hdr->checksum;
-    struct ip_header verify = *hdr;
-    verify.checksum = 0;
-    uint16_t calc_checksum = ip_checksum(&verify, ihl);
+    /* Копируем ВЕСЬ заголовок (с опциями, до 60 байт) и обнуляем checksum:
+       struct ip_header — только 20 байт, читать по &verify при ihl>20 нельзя. */
+    uint8_t verify[60];
+    for (uint8_t k = 0; k < ihl; k++) verify[k] = ((const uint8_t*)packet)[k];
+    verify[10] = 0;
+    verify[11] = 0;
+    uint16_t calc_checksum = ip_checksum(verify, ihl);
     if (calc_checksum != ntohs(saved_checksum)) return -1;
 
     if (header) {
@@ -192,7 +196,7 @@ static void ip_format_octet(uint8_t octet, char* buf, int* pos) {
 }
 
 void ip_format_address(uint32_t ip, char* buf, size_t buflen) {
-    if (!buf || buflen < 8) return;
+    if (!buf || buflen < 16) return;   /* "255.255.255.255" + NUL = 16 */
     int p = 0;
     ip_format_octet((ip >> 24) & 0xFF, buf, &p);
     buf[p++] = '.';
@@ -287,7 +291,18 @@ static int ip_send_frame(struct netif* nif, uint32_t next_hop, const void* ip_pk
     return nic_send_packet(frame, (size_t)frame_len);
 }
 
-int ip_output(uint32_t dest_ip, uint8_t protocol, const void* payload, size_t payload_size) {
+static int ip_send_frame_ttl(struct netif* nif, uint32_t next_hop,
+                             uint8_t* ip_pkt, size_t ip_len, uint8_t ttl) {
+    struct ip_header* h = (struct ip_header*)ip_pkt;
+    h->ttl = ttl;
+    h->checksum = 0;
+    uint16_t csum = ip_checksum(h, sizeof(struct ip_header));
+    h->checksum = htons(csum);
+    return ip_send_frame(nif, next_hop, ip_pkt, ip_len);
+}
+
+static int ip_output_ex(uint32_t dest_ip, uint8_t protocol, const void* payload,
+                        size_t payload_size, uint8_t ttl) {
     if (!payload && payload_size) return -1;
     uint32_t src_ip = ip_get_our_ip();
     uint32_t next_hop = dest_ip;
@@ -311,7 +326,7 @@ int ip_output(uint32_t dest_ip, uint8_t protocol, const void* payload, size_t pa
         int ip_len = ip_create_packet_ex(ip_buffer, sizeof(ip_buffer), src_ip, dest_ip,
                                          protocol, id, 0, payload, payload_size);
         if (ip_len < 0) return -1;
-        return ip_send_frame(nif, next_hop, ip_buffer, (size_t)ip_len);
+        return ip_send_frame_ttl(nif, next_hop, ip_buffer, (size_t)ip_len, ttl);
     }
 
     size_t offset = 0;
@@ -326,10 +341,19 @@ int ip_output(uint32_t dest_ip, uint8_t protocol, const void* payload, size_t pa
         int ip_len = ip_create_packet_ex(ip_buffer, sizeof(ip_buffer), src_ip, dest_ip,
                                          protocol, id, flags_frag, src + offset, chunk);
         if (ip_len < 0) return -1;
-        if (ip_send_frame(nif, next_hop, ip_buffer, (size_t)ip_len) != 0) return -1;
+        if (ip_send_frame_ttl(nif, next_hop, ip_buffer, (size_t)ip_len, ttl) != 0) return -1;
         offset += chunk;
     }
     return 0;
+}
+
+int ip_output(uint32_t dest_ip, uint8_t protocol, const void* payload, size_t payload_size) {
+    return ip_output_ex(dest_ip, protocol, payload, payload_size, 64);
+}
+
+int ip_output_ttl(uint32_t dest_ip, uint8_t protocol, const void* payload,
+                  size_t payload_size, uint8_t ttl) {
+    return ip_output_ex(dest_ip, protocol, payload, payload_size, ttl);
 }
 
 int ip_input_fragment(const void* packet, size_t packet_size,
@@ -371,7 +395,7 @@ int ip_input_fragment(const void* packet, size_t packet_size,
         reass_table[slot].protocol = hdr.protocol;
         reass_table[slot].received_len = 0;
         reass_table[slot].total_len = 0;
-        reass_table[slot].bitmap = 0;
+        for (size_t i = 0; i < sizeof(reass_table[slot].cov); i++) reass_table[slot].cov[i] = 0;
         for (size_t i = 0; i < IP_REASS_BUF; i++) reass_table[slot].buffer[i] = 0;
     }
     reass_table[slot].deadline_ms = timer_ms() + IP_REASS_TIMEOUT_MS;
@@ -382,9 +406,16 @@ int ip_input_fragment(const void* packet, size_t packet_size,
     }
     const uint8_t* src = (const uint8_t*)frag_payload;
     for (size_t i = 0; i < frag_len; i++) {
-        reass_table[slot].buffer[offset + i] = src[i];
+        size_t pos = offset + i;
+        reass_table[slot].buffer[pos] = src[i];
+        /* Учитываем байт только если он ещё не был покрыт (иначе перекрытия
+           «заполняли» бы дыры и сборка завершалась с пропусками). */
+        uint8_t mask = (uint8_t)(1u << (pos & 7));
+        if (!(reass_table[slot].cov[pos >> 3] & mask)) {
+            reass_table[slot].cov[pos >> 3] |= mask;
+            reass_table[slot].received_len++;
+        }
     }
-    reass_table[slot].received_len = (uint16_t)(reass_table[slot].received_len + frag_len);
     if (!mf) {
         reass_table[slot].total_len = (uint16_t)(offset + frag_len);
     }

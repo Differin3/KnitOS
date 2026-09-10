@@ -123,6 +123,7 @@ int fs_truncate(const char* path, uint32_t new_size);
 int fs_stat(const char* path, struct fs_stat* st);
 int fs_chmod(const char* path, uint16_t mode);
 int fs_chown(const char* path, uint16_t uid, uint16_t gid);
+int fs_chgrp(const char* path, uint16_t gid);
 int fs_symlink(const char* target, const char* linkpath);
 int fs_readlink(const char* path, char* buf, size_t buf_size);
 int fs_link(const char* oldpath, const char* newpath);
@@ -153,5 +154,7 @@ int fs_access_ok(int idx, int want_write);
 
 uint16_t fs_current_uid(void);
 void fs_set_current_uid(uint16_t uid);
+uint16_t fs_current_gid(void);
+void fs_set_current_gid(uint16_t gid);
 
 #endif

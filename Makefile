@@ -18,6 +18,7 @@ ELF_SRC = kernel/elf.cpp
 USER_HELLO_SRC = user/hello.c
 USER_DEMO2_SRC = user/demo2.c
 USER_DEMO3_SRC = user/demo3.c
+USER_LAUNCHER_SRC = user/launcher.c
 USER_LINK = user/link.ld
 KERNEL_SRC = kernel/kernel.cpp
 IDT_SRC = kernel/idt.cpp
@@ -81,7 +82,7 @@ KERNEL_OBJ = boot/boot.o boot/interrupts.o boot/user_demo.o kernel/sched/switch.
 	kernel/drivers/storage/ata.o kernel/drivers/storage/ahci.o kernel/drivers/storage/nvme.o \
 	kernel/drivers/pci/pci.o kernel/fs.o kernel/fs_cache.o kernel/ramfs.o kernel/vfs.o kernel/fs_file.o kernel/fs_autotest.o kernel/utils.o kernel/utils/ls.o kernel/utils/find.o kernel/utils/nano.o \
 	kernel/drivers/storage/disk_manager.o kernel/mount.o kernel/dev.o kernel/driver_manager.o \
-	kernel/syscall.o kernel/kernel_api.o \
+	kernel/syscall.o kernel/kernel_api.o kernel/user_auth.o \
 	kernel/drivers/network/nic.o kernel/drivers/network/socket.o \
 	kernel/drivers/network/core/skb.o kernel/drivers/network/core/netif.o \
 	kernel/drivers/network/core/net_queue.o kernel/drivers/network/core/net_rx.o \
@@ -99,6 +100,11 @@ KERNEL_BIN = iso/boot/kernel.bin
 ISO = myos.iso
 
 all: $(ISO)
+
+check: all
+	@test -s $(KERNEL_BIN) || { echo "missing $(KERNEL_BIN)"; exit 1; }
+	@test -s $(ISO) || { echo "missing $(ISO)"; exit 1; }
+	@echo "check OK: $(ISO) ($$(stat -c%s $(ISO)) bytes)"
 
 $(ISO): $(KERNEL_BIN)
 	grub-mkrescue -o $(ISO) iso/
@@ -127,7 +133,12 @@ user/demo3.elf: $(USER_DEMO3_SRC) user/syscall.h user/link.ld
 		-mno-red-zone -mno-mmx -mno-sse -mno-sse2 -nostdlib -Iuser -c -o user/demo3.o $(USER_DEMO3_SRC)
 	$(LD) -m elf_i386 -nostdlib -static -T user/link.ld -z noseparate-code -z max-page-size=0x1000 -o user/demo3.elf user/demo3.o
 
-boot/user_demo.o: $(USER_DEMO_SRC) user/hello.elf user/demo2.elf user/demo3.elf
+user/launcher.elf: $(USER_LAUNCHER_SRC) user/syscall.h user/link.ld
+	$(CC) -m32 -ffreestanding -fno-pic -fno-pie -fno-stack-protector -fno-builtin -fno-asynchronous-unwind-tables \
+		-mno-red-zone -mno-mmx -mno-sse -mno-sse2 -nostdlib -Iuser -c -o user/launcher.o $(USER_LAUNCHER_SRC)
+	$(LD) -m elf_i386 -nostdlib -static -T user/link.ld -z noseparate-code -z max-page-size=0x1000 -o user/launcher.elf user/launcher.o
+
+boot/user_demo.o: $(USER_DEMO_SRC) user/hello.elf user/demo2.elf user/demo3.elf user/launcher.elf
 	$(ASM) $(ASMFLAGS) -i . -o boot/user_demo.o $(USER_DEMO_SRC)
 
 kernel/elf.o: $(ELF_SRC) kernel/elf.h kernel/serial_log.h
@@ -186,6 +197,9 @@ kernel/keyboard_autotest.o: kernel/keyboard_autotest.cpp kernel/keyboard_autotes
 
 kernel/user_autotest.o: kernel/user_autotest.cpp kernel/user_autotest.h kernel/sched/task.h kernel/mm/paging.h kernel/fs.h kernel/vfs.h kernel/ramfs.h
 	$(CC) $(CFLAGS) -c -o kernel/user_autotest.o kernel/user_autotest.cpp
+
+kernel/user_auth.o: kernel/user_auth.cpp kernel/user_auth.h kernel/fs.h kernel/string.h
+	$(CC) $(CFLAGS) -c -o kernel/user_auth.o kernel/user_auth.cpp
 
 kernel/drivers/storage/ata.o: $(ATA_SRC) kernel/drivers/storage/ata.h
 	$(CC) $(CFLAGS) -c -o kernel/drivers/storage/ata.o $(ATA_SRC)
@@ -323,6 +337,6 @@ kernel/drivers/network/http_gzip.o: $(HTTP_GZIP_SRC) kernel/drivers/network/http
 	$(CC) $(CFLAGS) -c -o kernel/drivers/network/http_gzip.o $(HTTP_GZIP_SRC)
 
 clean:
-	rm -f $(KERNEL_OBJ) $(KERNEL_BIN) $(ISO) user/hello.o user/hello.elf user/demo2.o user/demo2.elf user/demo3.o user/demo3.elf
+	rm -f $(KERNEL_OBJ) $(KERNEL_BIN) $(ISO) user/hello.o user/hello.elf user/demo2.o user/demo2.elf user/demo3.o user/demo3.elf user/launcher.o user/launcher.elf
 
-.PHONY: all clean
+.PHONY: all check clean
