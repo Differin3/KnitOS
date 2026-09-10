@@ -52,6 +52,29 @@
 
 Перед сетевыми вызовами нужен IP (`dhcp` или `network static`). В shell: `socktest tcp|udp <port>`.
 
+### Процессы (M1)
+
+- `SYS_FORK (37)` — создать процесс-клон (deep-copy адресного пространства).
+  - возвращает 0 в ребёнке и pid ребёнка в родителе.
+- `SYS_WAIT (38)` — дождаться завершения ребёнка.
+  - args: `pid` (-1 = любой), `int* status`.
+- `SYS_PIPE (39)` — создать канал.
+  - args: `int fds[2]` (fds[0]=чтение, fds[1]=запись).
+- `SYS_DUP2 (40)` — дублировать fd.
+- `SYS_GETPID (41)`, `SYS_GETPPID (46)`, `SYS_GETGID (44)`, `SYS_SETGID (45)`.
+- `SYS_EXECVE (43)` — заменить образ: args `path`, `char* argv[]`.
+
+### PTY (M2)
+
+- `SYS_PTY_OPEN (47)` — создать псевдотерминал.
+  - args: `int fds[2]` (fds[0]=мастер, fds[1]=slave).
+  - мастер пишет ввод программы (с эхо и line discipline), читает её вывод;
+    slave используется программой как stdin/stdout.
+- `SYS_ISATTY (48)` — args: `fd`; возвращает 1 для tty (PTY или консоль).
+
+В shell: `ptyrun argtest|ptytest` — запуск программы с stdio на slave-конце PTY;
+набор текста идёт в программу, Ctrl+C прерывает её.
+
 ## Примеры вызова (ассемблер userland)
 ```asm
 ; Пример: прочитать 1 сектор с LBA0 в буфер buf

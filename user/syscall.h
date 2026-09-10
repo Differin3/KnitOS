@@ -58,6 +58,9 @@ typedef long ssize_t;
 #define SYS_SETGID      45
 #define SYS_GETPPID     46
 
+#define SYS_PTY_OPEN    47
+#define SYS_ISATTY      48
+
 /* ---- flags ---- */
 #define O_RDONLY  0x0001
 #define O_WRONLY  0x0002
@@ -157,6 +160,12 @@ static inline long sys_wait(int* status) {
 }
 static inline long sys_pipe(int fds[2]) {
     return syscall2(SYS_PIPE, (uint32_t)(unsigned long)fds);
+}
+static inline long sys_pty_open(int fds[2]) {
+    return syscall2(SYS_PTY_OPEN, (uint32_t)(unsigned long)fds);
+}
+static inline long sys_isatty(long fd) {
+    return syscall2(SYS_ISATTY, (uint32_t)fd);
 }
 static inline long sys_getpid(void) { return syscall1(SYS_GETPID); }
 static inline long sys_getppid(void) { return syscall1(SYS_GETPPID); }
