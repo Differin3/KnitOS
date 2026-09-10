@@ -91,7 +91,7 @@ KERNEL_OBJ = boot/boot.o boot/interrupts.o boot/user_demo.o kernel/sched/switch.
 	kernel/drivers/network/core/net_wait.o kernel/drivers/network/core/net_ports.o \
 	kernel/drivers/network/http_protocol.o kernel/drivers/network/http_gzip.o kernel/drivers/network/http_server.o \
 	kernel/drivers/network/remote_shell.o kernel/drivers/network/ftp_server.o \
-	kernel/crypto/sha256.o kernel/crypto/chacha20poly1305.o kernel/crypto/x25519.o kernel/crypto/rng.o kernel/crypto/crypto_selftest.o \
+	kernel/crypto/sha256.o kernel/crypto/chacha20poly1305.o kernel/crypto/x25519.o kernel/crypto/ed25519.o kernel/crypto/rng.o kernel/crypto/crypto_selftest.o \
 	kernel/drivers/network/drivers/rtl8139/rtl8139.o kernel/drivers/network/drivers/pcnet/pcnet.o \
 	kernel/drivers/network/drivers/virtio_net/virtio_net.o \
 	kernel/drivers/network/protocols/ethernet.o kernel/drivers/network/protocols/arp.o \
@@ -403,6 +403,9 @@ kernel/crypto/x25519.o: kernel/crypto/x25519.cpp kernel/crypto/x25519.h
 kernel/crypto/rng.o: kernel/crypto/rng.cpp kernel/crypto/rng.h kernel/crypto/sha256.h kernel/crypto/chacha20poly1305.h
 	$(CC) $(CFLAGS) -c -o kernel/crypto/rng.o kernel/crypto/rng.cpp
 
+kernel/crypto/ed25519.o: kernel/crypto/ed25519.cpp kernel/crypto/ed25519.h
+	$(CC) $(CFLAGS) -c -o kernel/crypto/ed25519.o kernel/crypto/ed25519.cpp
+
 kernel/drivers/network/http_protocol.o: $(HTTP_PROTOCOL_SRC) kernel/drivers/network/http_protocol.h
 	$(CC) $(CFLAGS) -c -o kernel/drivers/network/http_protocol.o $(HTTP_PROTOCOL_SRC)
 
@@ -414,5 +417,5 @@ clean:
 
 .PHONY: all check clean
 
-kernel/crypto/crypto_selftest.o: kernel/crypto/crypto_selftest.cpp kernel/crypto/sha256.h kernel/crypto/chacha20poly1305.h kernel/crypto/x25519.h
+kernel/crypto/crypto_selftest.o: kernel/crypto/crypto_selftest.cpp kernel/crypto/sha256.h kernel/crypto/chacha20poly1305.h kernel/crypto/x25519.h kernel/crypto/ed25519.h
 	$(CC) $(CFLAGS) -c -o kernel/crypto/crypto_selftest.o kernel/crypto/crypto_selftest.cpp
