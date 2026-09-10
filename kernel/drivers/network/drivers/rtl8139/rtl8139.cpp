@@ -64,7 +64,7 @@ static inline uint32_t rtl8139_ring_offset(uint32_t cur_rx) {
 }
 
 static void rtl8139_update_capr(uint16_t io, uint32_t cur_rx) {
-    uint16_t capr = (uint16_t)(cur_rx - 16);
+    uint16_t capr = (uint16_t)((cur_rx % RTL8139_RX_BUF_SIZE) - 16);
     outw(io + RTL8139_CAPR, capr);
 }
 
@@ -76,9 +76,12 @@ static void rtl8139_rx_reset(struct nic_device* nic) {
     if (!nic) return;
     uint16_t io = nic->io_base;
 
-    rtl8139_cur_rx = 0;
-    nic->rx_current = 0;
-    rtl8139_update_capr(io, 0);
+    /* Ресинхронизация по указателю записи NIC (CBR), а не жёсткий 0:
+       иначе при живом CBR драйвер вечно читает мусор в offset 0. */
+    uint16_t cbr = (uint16_t)(inw(io + RTL8139_CBR) % RTL8139_RX_BUF_SIZE);
+    rtl8139_cur_rx = cbr;
+    nic->rx_current = cbr;
+    rtl8139_update_capr(io, cbr);
     rtl8139_ack_rx(io);
 
     log_msg(LOG_ERR, "rtl8139", "rx ring reset");
@@ -151,7 +154,10 @@ static int rtl8139_init_common(struct nic_device* nic) {
     }
 
     outw(io + RTL8139_ISR, 0xFFFF);
-    outw(io + RTL8139_INTR_MASK, RTL8139_INTR_ENABLE);
+    /* Poll-only: RX-прерывания не включаем (иначе IRQ-обработчик и задачи
+       одновременно дёргают RX-кольцо и cur_rx рассинхронизируется). */
+    outw(io + RTL8139_INTR_MASK, 0x0000);
+    /* RBLEN: QEMU ожидает ненулевое значение; оставляем как было. */
     outl(io + RTL8139_RX_CONFIG, 0x0F | (1 << 7));
     outl(io + RTL8139_TX_CONFIG, 0x03000700);
 
@@ -342,6 +348,10 @@ int rtl8139_receive_packet(struct nic_device* nic, void* buffer, size_t max_len)
     uint16_t rx_size = (uint16_t)((header >> 16) & 0xFFFF);
 
     if (rx_size == 0xFFF0) {
+        /* Маркер переноса кольца: пакет не влез в конец, NIC продолжит с 0. */
+        rtl8139_cur_rx = 0;
+        nic->rx_current = 0;
+        rtl8139_update_capr(io, 0);
         return 0;
     }
 
