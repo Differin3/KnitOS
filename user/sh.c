@@ -89,8 +89,17 @@ static void run_builtin(char** argv, int* handled) {
         long n;
         while ((n = sys_read(fd, buf, sizeof(buf))) > 0) sys_write(1, buf, (unsigned long)n);
         sys_close(fd);
+    } else if (!strcmp(argv[0], "touch")) {
+        if (!argv[1]) { printf("touch: usage: touch <file>\n"); return; }
+        int fd = (int)sys_open(argv[1], O_CREAT | O_WRONLY, 0);
+        if (fd < 0) printf("touch: %s: failed\n", argv[1]);
+        else sys_close(fd);
+    } else if (!strcmp(argv[0], "rm")) {
+        if (!argv[1]) { printf("rm: usage: rm <file>\n"); return; }
+        if (sys_unlink(argv[1]) < 0) printf("rm: %s: failed\n", argv[1]);
     } else if (!strcmp(argv[0], "help")) {
-        printf("builtins: cd pwd ls cat echo id exit help\n");
+        printf("builtins: cd pwd ls cat touch rm echo id exit help\n");
+        printf("kernel cmds: uname uptime ps ifconfig df\n");
     } else {
         *handled = 0;
     }
@@ -153,10 +162,17 @@ int main(int argc, char** argv) {
         int handled = 0;
         run_builtin(g_argv, &handled);
         if (!handled) {
-            long pid = sys_fork();
-            if (pid == 0) run_exec(g_argv);
-            if (pid > 0) { int st; sys_waitpid((int)pid, &st); }
-            else printf("sh: fork failed\n");
+            /* Try a kernel command (uname/uptime/ps/ifconfig/df), else exec. */
+            static char kout[2048];
+            long n = sys_kcmd(g_argv[0], kout, sizeof(kout));
+            if (n > 0) {
+                sys_write(1, kout, (unsigned long)n);
+            } else {
+                long pid = sys_fork();
+                if (pid == 0) run_exec(g_argv);
+                if (pid > 0) { int st; sys_waitpid((int)pid, &st); }
+                else printf("sh: fork failed\n");
+            }
         }
     }
     return 0;

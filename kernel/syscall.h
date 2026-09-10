@@ -58,6 +58,7 @@
 #define SYS_PTY_OPEN    47
 #define SYS_ISATTY      48
 #define SYS_CRYPTO      49
+#define SYS_KCMD        50
 
 /* Крипто-операции (SYS_CRYPTO). */
 struct kcrypto_req {
