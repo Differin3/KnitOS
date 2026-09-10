@@ -83,6 +83,7 @@ KERNEL_OBJ = boot/boot.o boot/interrupts.o boot/user_demo.o kernel/sched/switch.
 	kernel/drivers/pci/pci.o kernel/fs.o kernel/fs_cache.o kernel/ramfs.o kernel/vfs.o kernel/fs_file.o kernel/fs_autotest.o kernel/utils.o kernel/utils/ls.o kernel/utils/find.o kernel/utils/nano.o \
 	kernel/drivers/storage/disk_manager.o kernel/mount.o kernel/dev.o kernel/driver_manager.o \
 	kernel/syscall.o kernel/kernel_api.o kernel/user_auth.o \
+	kernel/pipe.o \
 	kernel/drivers/network/nic.o kernel/drivers/network/socket.o \
 	kernel/drivers/network/core/skb.o kernel/drivers/network/core/netif.o \
 	kernel/drivers/network/core/net_queue.o kernel/drivers/network/core/net_rx.o \
@@ -224,6 +225,9 @@ kernel/user_autotest.o: kernel/user_autotest.cpp kernel/user_autotest.h kernel/s
 
 kernel/user_auth.o: kernel/user_auth.cpp kernel/user_auth.h kernel/fs.h kernel/string.h
 	$(CC) $(CFLAGS) -c -o kernel/user_auth.o kernel/user_auth.cpp
+
+kernel/pipe.o: kernel/pipe.cpp kernel/pipe.h kernel/sched/task.h
+	$(CC) $(CFLAGS) -c -o kernel/pipe.o kernel/pipe.cpp
 
 kernel/drivers/storage/ata.o: $(ATA_SRC) kernel/drivers/storage/ata.h
 	$(CC) $(CFLAGS) -c -o kernel/drivers/storage/ata.o $(ATA_SRC)

@@ -216,7 +216,7 @@ static const char* task_path_base(const char* path) {
 
 /* exec для ring3: заменяет образ текущей задачи ELF-файлом из ФС.
    При успехе возврата НЕТ — задача уходит в ring3 с новой программой. */
-int task_exec_user(const char* path) {
+int task_exec_user_argv(const char* path, int argc, const char* const* argv) {
     if (!g_sched_ready || !g_current || !g_current->is_user || !path || !path[0]) {
         return -1;
     }
@@ -271,11 +271,19 @@ int task_exec_user(const char* path) {
     /* Уходим в ring3 к новой программе. Сюда не возвращаемся. */
     {
         const char* argv0[1];
-        argv0[0] = task_path_base(path);
-        uint32_t usp = user_prepare_args(nstack, 1, argv0);
+        if (argc <= 0 || !argv) {
+            argv0[0] = task_path_base(path);
+            argv = argv0;
+            argc = 1;
+        }
+        uint32_t usp = user_prepare_args(nstack, argc, argv);
         user_mode_enter(entry, usp);
     }
     return 0;
+}
+
+int task_exec_user(const char* path) {
+    return task_exec_user_argv(path, 0, 0);
 }
 
 static void task_slot_clear(struct task* t) {

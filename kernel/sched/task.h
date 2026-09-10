@@ -16,6 +16,8 @@
 #define TASK_FD_NONE 0
 #define TASK_FD_SOCK 1
 #define TASK_FD_FILE 2
+#define TASK_FD_PIPE_R 3
+#define TASK_FD_PIPE_W 4
 
 enum task_state {
     TASK_UNUSED = 0,
@@ -124,6 +126,7 @@ int task_spawn_user(const uint8_t* elf_img, size_t elf_len, const char* name);
  * сохраняются). Возвращает <0 при ошибке.
  */
 int task_exec_user(const char* path);
+int task_exec_user_argv(const char* path, int argc, const char* const* argv);
 
 /* Per-task uid. 0 = root, обычный user = 1000. */
 int task_getuid(void);
