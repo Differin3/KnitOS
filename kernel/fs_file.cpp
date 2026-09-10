@@ -308,5 +308,5 @@ int vfs_getdents(int tfd, char* buf, size_t size) {
         n++;
     }
     buf[n] = 0;
-    return (int)n;
+    return (int)(n + 1); /* include the NUL terminator */
 }
