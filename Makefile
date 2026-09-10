@@ -164,12 +164,17 @@ user/ptytest.elf: user/ptytest.c user/crt0.o $(USER_LIB_OBJ) user/link.ld user/s
 	$(LD) -m elf_i386 -nostdlib -static -T user/link.ld -z noseparate-code -z max-page-size=0x1000 \
 		-o user/ptytest.elf user/crt0.o user/ptytest.o $(USER_LIB_OBJ)
 
+user/httpd.elf: user/httpd.c user/crt0.o $(USER_LIB_OBJ) user/link.ld user/syscall.h
+	$(CC) $(USER_CFLAGS) -c -o user/httpd.o user/httpd.c
+	$(LD) -m elf_i386 -nostdlib -static -T user/link.ld -z noseparate-code -z max-page-size=0x1000 \
+		-o user/httpd.elf user/crt0.o user/httpd.o $(USER_LIB_OBJ)
+
 user/launcher.elf: $(USER_LAUNCHER_SRC) user/syscall.h user/link.ld
 	$(CC) -m32 -ffreestanding -fno-pic -fno-pie -fno-stack-protector -fno-builtin -fno-asynchronous-unwind-tables \
 		-mno-red-zone -mno-mmx -mno-sse -mno-sse2 -nostdlib -Iuser -c -o user/launcher.o $(USER_LAUNCHER_SRC)
 	$(LD) -m elf_i386 -nostdlib -static -T user/link.ld -z noseparate-code -z max-page-size=0x1000 -o user/launcher.elf user/launcher.o
 
-boot/user_demo.o: $(USER_DEMO_SRC) user/hello.elf user/demo2.elf user/demo3.elf user/launcher.elf user/argtest.elf user/ptytest.elf
+boot/user_demo.o: $(USER_DEMO_SRC) user/hello.elf user/demo2.elf user/demo3.elf user/launcher.elf user/argtest.elf user/ptytest.elf user/httpd.elf
 	$(ASM) $(ASMFLAGS) -i . -o boot/user_demo.o $(USER_DEMO_SRC)
 
 kernel/elf.o: $(ELF_SRC) kernel/elf.h kernel/serial_log.h

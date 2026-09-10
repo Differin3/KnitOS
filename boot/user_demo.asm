@@ -19,6 +19,9 @@ global user_argtest_size
 global user_ptytest_start
 global user_ptytest_end
 global user_ptytest_size
+global user_httpd_start
+global user_httpd_end
+global user_httpd_size
 
 user_demo_start:
     incbin "user/hello.elf"
@@ -55,3 +58,9 @@ user_ptytest_start:
 user_ptytest_end:
 user_ptytest_size:
     dd user_ptytest_end - user_ptytest_start
+
+user_httpd_start:
+    incbin "user/httpd.elf"
+user_httpd_end:
+user_httpd_size:
+    dd user_httpd_end - user_httpd_start
