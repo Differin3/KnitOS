@@ -670,6 +670,20 @@ void terminal_putchar(char c) {
             terminal_column = term_cols - 1;
         }
         set_cell(terminal_row, terminal_column, ' ', terminal_color);
+    } else if (c == '\t') {
+        /* Табуляция до следующей границы 8 столбцов. */
+        do {
+            set_cell(terminal_row, terminal_column, ' ', terminal_color);
+            terminal_column++;
+        } while (terminal_column < term_cols && (terminal_column & 7) != 0);
+        if (terminal_column >= term_cols) {
+            terminal_column = 0;
+            terminal_row++;
+        }
+        if (terminal_row >= max_r) {
+            if (!editor_mode) terminal_scroll_content(1);
+            terminal_row = max_r - 1;
+        }
     } else {
         set_cell(terminal_row, terminal_column, c, terminal_color);
         terminal_column++;
