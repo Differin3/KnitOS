@@ -2,8 +2,10 @@
 #include "nano.h"
 #include "../drivers/video/terminal.h"
 #include "../drivers/input/keyboard.h"
+#include "../serial_log.h"
 #include "../fs.h"
 #include "../kernel.h"
+#include "../drivers/network/nic.h"
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
@@ -445,6 +447,7 @@ static int nano_poll_key(char* out_ch) {
     if (nano_status_ttl > 0) nano_status_ttl--;
 
     char c = keyboard_poll();
+    if (c == 0) c = serial_poll_char();   /* ввод с COM1 (serial-консоль) */
     if (c == 0) return NANO_KEY_NONE;
 
     uint8_t uc = (uint8_t)c;
@@ -612,6 +615,7 @@ int nano_edit(const char* path) {
     nano_draw();
 
     for (;;) {
+        nic_process_packets();   /* не даём сети «зависнуть», пока открыт редактор */
         char ch = 0;
         int key = nano_poll_key(&ch);
 

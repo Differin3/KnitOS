@@ -3,6 +3,7 @@
 #include "../protocols/ip.h"
 #include "../nic.h"
 #include "../protocols/ethernet.h"
+#include "../../../string.h"
 #include "../protocols/arp.h"
 #include "../dns/dns.h"
 #include "../protocols/tcp_connection.h"
@@ -58,6 +59,25 @@ static void dhcp_print(const char* msg) {
 }
 
 #define DHCP_RENEW_TIMEOUT_TICKS 300
+
+// Hostname, отправляемый в DHCP (option 12)
+// Роутеры показывают клиентов по hostname в списке устройств
+static char dhcp_hostname[32] = "KnitOS";
+
+const char* dhcp_get_hostname(void) {
+    return dhcp_hostname;
+}
+
+int dhcp_set_hostname(const char* name) {
+    if (!name || !name[0]) return -1;
+    size_t i = 0;
+    while (name[i] && i < sizeof(dhcp_hostname) - 1) {
+        dhcp_hostname[i] = name[i];
+        i++;
+    }
+    dhcp_hostname[i] = 0;
+    return 0;
+}
 
 static uint32_t dhcp_generate_xid() {
     uint8_t mac[6];
@@ -117,8 +137,12 @@ static int dhcp_send_discover() {
     uint8_t our_mac[6];
     nic_get_mac(our_mac);
     
-    // Генерируем случайный transaction ID
-    dhcp_xid = dhcp_generate_xid();
+    // Генерируем transaction ID только один раз за сессию,
+    // иначе поздние OFFER от медленного DHCP-сервера
+    // будут отклонены из-за несовпадения XID
+    if (dhcp_xid == 0) {
+        dhcp_xid = dhcp_generate_xid();
+    }
     
     // Создаем DHCP заголовок
     struct dhcp_header dhcp_hdr = {0};
@@ -142,6 +166,9 @@ static int dhcp_send_discover() {
     // Добавляем опции
     uint8_t msg_type = DHCP_MESSAGE_TYPE_DISCOVER;
     dhcp_add_option(dhcp_buffer, sizeof(dhcp_buffer), &pos, DHCP_OPTION_MESSAGE_TYPE, &msg_type, 1);
+    
+    // Hostname (option 12) - чтобы клиент отображался в списке устройств роутера
+    dhcp_add_option(dhcp_buffer, sizeof(dhcp_buffer), &pos, DHCP_OPTION_HOSTNAME, (uint8_t*)dhcp_hostname, strlen(dhcp_hostname));
     
     uint8_t param_list[] = {DHCP_OPTION_SUBNET_MASK, DHCP_OPTION_ROUTER, DHCP_OPTION_DNS_SERVER};
     dhcp_add_option(dhcp_buffer, sizeof(dhcp_buffer), &pos, DHCP_OPTION_PARAMETER_REQUEST_LIST, param_list, 3);
@@ -188,6 +215,9 @@ static int dhcp_send_request(uint32_t requested_ip, uint32_t server_ip) {
     // Добавляем опции
     uint8_t msg_type = DHCP_MESSAGE_TYPE_REQUEST;
     dhcp_add_option(dhcp_buffer, sizeof(dhcp_buffer), &pos, DHCP_OPTION_MESSAGE_TYPE, &msg_type, 1);
+    
+    // Hostname (option 12) - чтобы клиент отображался в списке устройств роутера
+    dhcp_add_option(dhcp_buffer, sizeof(dhcp_buffer), &pos, DHCP_OPTION_HOSTNAME, (uint8_t*)dhcp_hostname, strlen(dhcp_hostname));
     
     uint32_t req_ip = htonl(requested_ip);
     dhcp_add_option(dhcp_buffer, sizeof(dhcp_buffer), &pos, DHCP_OPTION_REQUESTED_IP, &req_ip, 4);
@@ -527,7 +557,7 @@ static int dhcp_do_acquire(void) {
     int max_attempts = 100;
     int discover_retries = 0;
     int request_retries = 0;
-    const int MAX_DISCOVER_RETRIES = 3;
+    const int MAX_DISCOVER_RETRIES = 6;
     const int MAX_REQUEST_RETRIES = 3;
     
     while (dhcp_current_state == DHCP_STATE_DISCOVERING || dhcp_current_state == DHCP_STATE_REQUESTING) {

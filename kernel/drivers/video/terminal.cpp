@@ -12,6 +12,7 @@ static size_t terminal_column = 0;
 static uint8_t terminal_color = 0x07;
 static size_t term_cols = VGA_WIDTH;
 static size_t term_rows = VGA_HEIGHT;
+static size_t term_rows_phys = VGA_HEIGHT; /* физический максимум строк */
 static size_t content_rows = VGA_HEIGHT - 2;
 static size_t content_origin = 1;
 static bool use_fb = false;
@@ -86,6 +87,16 @@ static void vga_hw_cursor(size_t row, size_t col) {
     outb(0x3D5, (uint8_t)((pos >> 8) & 0xFF));
 }
 
+/* Полный светящийся блок (scanlines 0..15) вместо тонкой полоски, чтобы
+   курсор был хорошо виден. Мигание включено (бит 5 регистра 0x0A = 0). */
+static void vga_cursor_block(void) {
+    if (use_fb) return;
+    outb(0x3D4, 0x0A);
+    outb(0x3D5, 0x00);
+    outb(0x3D4, 0x0B);
+    outb(0x3D5, 0x0F);
+}
+
 static void backend_draw_cell(size_t row, size_t col, uint16_t entry) {
     char c = (char)(entry & 0xFF);
     uint8_t attr = (uint8_t)(entry >> 8);
@@ -114,6 +125,34 @@ static void set_cell(size_t row, size_t col, char c, uint8_t color) {
     paint_cell(row, col);
 }
 
+/* Программный мигающий курсор (работает и в text, и в framebuffer).
+   Показывает инверсию ячейки на позиции ввода. */
+static bool   g_cursor_on     = true;
+static bool   g_cursor_painted = false;
+static size_t g_cursor_prow   = 0;
+static size_t g_cursor_pcol   = 0;
+
+static void term_draw_cursor_at(size_t row, size_t col) {
+    if (row >= term_rows || col >= term_cols) return;
+    /* Яркий блочный курсор. cells[][] НЕ трогаем — там истинный контент;
+       в текстовом режиме пишем блок напрямую в VGA-память. */
+    if (use_fb) {
+        fb_fill_block(col, row, 0x0F);
+    } else {
+        if (row >= 25 || col >= 80) return;
+        size_t idx = row * 80 + col;
+        VGA_MEMORY_PTR[idx * 2] = 0xDB;
+        VGA_MEMORY_PTR[idx * 2 + 1] = 0x0F;
+    }
+}
+
+static void term_restore_cursor_cell(void) {
+    if (!g_cursor_painted) return;
+    if (g_cursor_prow >= term_rows || g_cursor_pcol >= term_cols) return;
+    /* Перерисовываем ИСТИННЫЙ контент из cells[][] (курсор их не менял). */
+    backend_draw_cell(g_cursor_prow, g_cursor_pcol, cells[g_cursor_prow][g_cursor_pcol]);
+}
+
 static void terminal_update_cursor() {
     size_t min_r = editor_mode ? 0 : content_origin;
     size_t max_r = editor_mode ? term_rows : (content_origin + content_rows);
@@ -121,7 +160,26 @@ static void terminal_update_cursor() {
     if (terminal_row < min_r) terminal_row = min_r;
     if (terminal_row >= max_r) terminal_row = max_r - 1;
     if (terminal_column >= term_cols) terminal_column = term_cols > 0 ? term_cols - 1 : 0;
+    term_restore_cursor_cell();
+    g_cursor_prow = terminal_row;
+    g_cursor_pcol = terminal_column;
+    g_cursor_painted = true;
+    term_draw_cursor_at(g_cursor_prow, g_cursor_pcol);
     vga_hw_cursor(terminal_row, terminal_column);
+}
+
+/* Тик мигания: вызывать периодически (из главного цикла). */
+void terminal_cursor_tick(uint32_t now_ms) {
+    static uint32_t last_ms = 0;
+    if ((uint32_t)(now_ms - last_ms) < 450u) return;
+    last_ms = now_ms;
+    g_cursor_on = !g_cursor_on;
+    if (!g_cursor_painted) return;
+    if (g_cursor_on) {
+        term_draw_cursor_at(g_cursor_prow, g_cursor_pcol);
+    } else {
+        term_restore_cursor_cell();
+    }
 }
 
 static void history_push_row_cells(size_t row) {
@@ -342,14 +400,31 @@ void terminal_scroll_page_down() {
 bool terminal_in_scrollback() { return scrollback_mode; }
 
 void terminal_set_mode(size_t width, size_t height) {
+    /* Применяем запрошенный размер консоли (число строк; ширина — 80 в тексте).
+       Раньше аргументы игнорировались, и команда resolution врала об успехе. */
     (void)width;
-    (void)height;
+    if (height < 10) height = 10;
+    if (height > term_rows_phys) height = term_rows_phys;
     if (!use_fb) {
         term_cols = 80;
-        term_rows = 25;
-        recompute_layout();
+        term_rows = height;
+    } else {
+        /* Ширину FB рантаймом не меняем (иначе «хвосты» старой раскладки). */
+        term_rows = height;
+    }
+    recompute_layout();
+    if (!use_fb) vga_cursor_block();
+    /* Очищаем ВСЮ физическую сетку: иначе старый статус-бар остаётся ниже
+       новой (меньшей) контентной области. set_cell() тут не годится — он
+       отсекает строки >= нового term_rows. */
+    for (size_t r = 0; r < term_rows_phys && r < TERM_MAX_ROWS; r++) {
+        for (size_t c = 0; c < term_cols && c < TERM_MAX_COLS; c++) {
+            cells[r][c] = (uint16_t)' ' | ((uint16_t)terminal_color << 8);
+            backend_draw_cell(r, c, cells[r][c]);
+        }
     }
     terminal_clear_viewport();
+    terminal_set_cursor(terminal_content_origin(), 0);
 }
 
 static int terminal_driver_read(void* device_data, void* buffer, size_t size, uint32_t offset) {
@@ -401,9 +476,11 @@ void terminal_initialize() {
     use_fb = false;
     term_cols = 80;
     term_rows = 25;
+    term_rows_phys = 25;
     header_enabled = true;
     status_enabled = true;
     recompute_layout();
+    vga_cursor_block();
     status_left[0] = 0;
     status_mid[0] = 0;
     status_right[0] = 0;
@@ -492,6 +569,7 @@ void terminal_init_graphics(uint32_t multiboot_info) {
     use_fb = true;
     term_cols = cols;
     term_rows = rows;
+    term_rows_phys = rows;
     header_enabled = true;
     status_enabled = true;
     recompute_layout();

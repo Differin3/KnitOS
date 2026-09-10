@@ -60,6 +60,7 @@ struct task {
     uint32_t user_stack;  /* ring-3 ESP (top) */
     uint32_t kstack_top;  /* kernel stack top (TSS.esp0) */
     uint16_t uid;         /* user id (0 = root) */
+    uint16_t gid;         /* primary group id */
 };
 
 void sched_init(void);
@@ -116,10 +117,25 @@ int task_enable_aspace(int id);
  */
 int task_spawn_user(const uint8_t* elf_img, size_t elf_len, const char* name);
 
+/*
+ * exec для ring3-процесса: заменяет образ текущей задачи ПОЛНЫМ файлом
+ * программы (ELF), прочитанным из ФС по path. При успехе не возвращается —
+ * задача продолжается с новой entry на новом user-стеке (fd/cwd/uid
+ * сохраняются). Возвращает <0 при ошибке.
+ */
+int task_exec_user(const char* path);
+
 /* Per-task uid. 0 = root, обычный user = 1000. */
 int task_getuid(void);
 int task_setuid(uint16_t uid);
 int task_setuid_pid(int pid, uint16_t uid);
+/* Принудительная смена uid текущей задачи (для login/logout в привилегированном shell). */
+int task_setuid_force(uint16_t uid);
+
+/* Per-task primary gid. */
+int task_getgid(void);
+int task_setgid(uint16_t gid);
+int task_setgid_force(uint16_t gid);
 
 int sched_autotest(void);
 

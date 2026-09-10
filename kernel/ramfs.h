@@ -8,7 +8,7 @@
 
 #define RAMFS_MAX_NODES 64
 #define RAMFS_NAME_MAX  32
-#define RAMFS_FILE_MAX  4096
+#define RAMFS_FILE_MAX  16384
 
 void ramfs_init(void);
 int ramfs_mount_tmp(void);

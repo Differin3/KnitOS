@@ -6,6 +6,10 @@ iso/boot/kernel.bin
 # QEMU serial logs (host)
 logs/*.log
 
+# Scratch disk images (myos.img is kept intentionally)
+myimg.img
+
 # Editor
 .vscode/
 .cursor/
+.opencode/

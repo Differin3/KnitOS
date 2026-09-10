@@ -42,6 +42,7 @@
 #define SYS_GETCWD      33
 #define SYS_CHDIR       34
 #define SYS_SLEEP       35
+#define SYS_EXEC        36
 
 struct syscall_args {
     uint32_t arg0;

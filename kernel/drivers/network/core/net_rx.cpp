@@ -1,6 +1,7 @@
 #include "net_rx.h"
 #include "netif.h"
 #include "skb.h"
+#include "capture.h"
 #include "../protocols/ethernet.h"
 #include "../protocols/arp.h"
 #include "../protocols/ip.h"
@@ -13,6 +14,16 @@
 
 static inline uint16_t ntohs(uint16_t netshort) {
     return (uint16_t)(((netshort & 0xFF) << 8) | ((netshort >> 8) & 0xFF));
+}
+
+static net_capture_fn g_capture = 0;
+
+void net_capture_set(net_capture_fn fn) {
+    g_capture = fn;
+}
+
+net_capture_fn net_capture_get(void) {
+    return g_capture;
 }
 
 extern void udp_handle_packet(uint32_t src_ip, uint32_t dest_ip,
@@ -86,6 +97,9 @@ static void net_handle_ipv4(struct netif* nif, const uint8_t* src_mac,
 }
 
 static void net_handle_frame(struct netif* nif, const void* frame, size_t len) {
+    if (g_capture) {
+        g_capture(nif, 0, frame, len);
+    }
     struct ethernet_header eth_header;
     const void* payload;
     size_t payload_size;

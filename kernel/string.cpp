@@ -114,6 +114,18 @@ char* strrchr(const char* s, int c) {
     return (char*)last;
 }
 
+char* strstr(const char* haystack, const char* needle) {
+    if (!haystack || !needle) return 0;
+    if (!needle[0]) return (char*)haystack;
+    for (const char* h = haystack; *h; h++) {
+        const char* a = h;
+        const char* b = needle;
+        while (*a && *b && *a == *b) { a++; b++; }
+        if (!*b) return (char*)h;
+    }
+    return 0;
+}
+
 static char* strtok_save = 0;
 
 char* strtok(char* str, const char* delim) {

@@ -31,6 +31,8 @@
 #include "drivers/network/http_server.h"
 #include "drivers/network/core/netif.h"
 #include "drivers/network/core/net_ports.h"
+#include "drivers/network/core/capture.h"
+#include "drivers/network/protocols/ethernet.h"
 #include "drivers/network/protocols/route.h"
 #include "drivers/pic/pic.h"
 #include "drivers/timer/pit.h"
@@ -38,18 +40,85 @@
 #include "drivers/power/rtc.h"
 #include "sched/task.h"
 #include "serial_log.h"
+#include "user_auth.h"
 #include "mm/paging.h"
 #include "vga_autotest.h"
 #include "keyboard_autotest.h"
 #include "user_autotest.h"
 #include "heap.h"
+#include "string.h"
 #include <stddef.h>
 #include <stdint.h>
+
+/* Текущий логин (имя пользователя консольной сессии) хранится в struct shell_session
+   (см. макрос g_login_user внутри kernel_main). Отдельного глобала нет. */
+
+/* ---- Независимые консольные сессии (задел под SSH) ----
+   Каждая сессия хранит собственное состояние интерактивного редактора:
+   буфер строки, историю команд, таб-завершение, uid/gid, логин и cwd.
+   Для одной физической консоли активна одна сессия (foreground); остальные
+   сохраняют своё состояние и переключаются. */
+#define SESS_MAX     8
+#define SESS_HIST    24
+#define SESS_LINE    128
+
+struct shell_session {
+    int      id;
+    bool     used;
+    char     name[16];
+    uint16_t uid;
+    uint16_t gid;
+    char     login[UNAME_MAX];
+
+    char     sbuf[SESS_LINE];      /* editor line buffer */
+    size_t   blen;                 /* line length */
+    size_t   cpos;                 /* cursor index within line (0..blen) */
+    size_t   prow;                 /* prompt screen row */
+    size_t   pcol;                 /* prompt screen col */
+    char     cwd[SESS_LINE];
+
+    size_t   tabll;                /* tab: last line len */
+    size_t   tabls;                /* tab: last word start */
+    int      tabci;                /* tab: cycle idx */
+
+    char     hist[SESS_HIST][SESS_LINE];
+    size_t   hlen[SESS_HIST];
+    int      hcnt;
+    int      hpos;
+    char     hdraft[SESS_LINE];
+    size_t   hdlen;
+    bool     hhas;
+};
+
+static struct shell_session g_sessions[SESS_MAX];
+static int g_session_count = 0;
+static int g_current_session = 0;
+
+static struct shell_session* cur_session(void) {
+    return &g_sessions[g_current_session];
+}
 
 static void shell_write_ip(uint32_t ip) {
     char buf[20];
     ip_format_address(ip, buf, sizeof(buf));
     terminal_writestring(buf);
+}
+
+/* Проверка, что name — отдельный токен в CSV-списке (members групп). */
+static bool csv_has_token(const char* list, const char* name) {
+    if (!list || !name || !name[0]) return false;
+    size_t nlen = 0;
+    while (name[nlen]) nlen++;
+    const char* m = list;
+    while (*m) {
+        while (*m == ',' || *m == ' ') m++;
+        const char* start = m;
+        while (*m && *m != ',') m++;
+        size_t tlen = (size_t)(m - start);
+        while (tlen > 0 && (start[tlen - 1] == ' ' || start[tlen - 1] == '\t')) tlen--;
+        if (tlen == nlen && strncmp(start, name, nlen) == 0) return true;
+    }
+    return false;
 }
 
 static bool shell_parse_u16_token(const char* s, size_t len, size_t* pos, uint16_t* out) {
@@ -215,6 +284,173 @@ static void ports_shell_print(const struct net_port_info* info, void* userdata) 
     }
 }
 
+/* ---- tcpdump: простая перехват фреймов с фильтрами ---- */
+static inline uint32_t net_to_host32(uint32_t v) {
+    return ((v & 0xFFu) << 24) | ((v & 0xFF00u) << 8) | ((v >> 8) & 0xFF00u) | ((v >> 24) & 0xFFu);
+}
+static inline uint16_t net_to_host16(uint16_t v) {
+    return (uint16_t)(((v & 0xFFu) << 8) | ((v >> 8) & 0xFFu));
+}
+static int  tcpdump_remaining = 0;   /* сколько пакетов ещё показать (0 = стоп) */
+static uint16_t tcpdump_filter_etype = 0; /* ETH_TYPE_* или 0 (любой) */
+static uint8_t  tcpdump_filter_proto = 0; /* IP_PROTOCOL_* или 0 (любой) */
+static bool     tcpdump_filter_ipv4 = false; /* только IPv4 (фильтр "ip") */
+static uint16_t tcpdump_filter_port = 0;  /* 0 = любой порт */
+static uint32_t tcpdump_filter_ip = 0;    /* 0 = любой IP (src или dst) */
+
+static void tcpdump_write_mac(const uint8_t* mac) {
+    static const char hx[] = "0123456789abcdef";
+    for (int i = 0; i < 6; i++) {
+        if (i > 0) terminal_putchar(':');
+        terminal_putchar(hx[mac[i] >> 4]);
+        terminal_putchar(hx[mac[i] & 0xF]);
+    }
+}
+
+static const char* tcpdump_proto_name(uint8_t p) {
+    switch (p) {
+        case IP_PROTOCOL_TCP:  return "TCP";
+        case IP_PROTOCOL_UDP:  return "UDP";
+        case IP_PROTOCOL_ICMP: return "ICMP";
+        default:               return "IP";
+    }
+}
+
+static void tcpdump_capture(struct netif* nif, int dir, const void* frame, size_t len) {
+    (void)nif;
+    if (tcpdump_remaining <= 0) return;
+
+    struct ethernet_header eth;
+    const void* pl;
+    size_t plen;
+    if (ethernet_parse_header(frame, len, &eth, &pl, &plen) != 0) return;
+    uint16_t etype = (uint16_t)(((eth.type & 0xFF) << 8) | ((eth.type >> 8) & 0xFF));
+
+    /* Протокольный фильтр (tcp/udp/icmp) относится только к IPv4. */
+    if (tcpdump_filter_proto && etype != ETH_TYPE_IPV4) return;
+    if (tcpdump_filter_ipv4 && etype != ETH_TYPE_IPV4) return;
+
+    if (etype == ETH_TYPE_ARP) {
+        if (tcpdump_filter_etype && tcpdump_filter_etype != ETH_TYPE_ARP) return;
+        terminal_writestring("\n");
+        terminal_writestring(dir ? "out " : "in  ");
+        terminal_writestring("ARP ");
+        tcpdump_write_mac(eth.src_mac);
+        terminal_writestring(" > ");
+        tcpdump_write_mac(eth.dest_mac);
+        if (plen >= sizeof(struct arp_packet)) {
+            const struct arp_packet* arp = (const struct arp_packet*)pl;
+            uint16_t op = (uint16_t)(((arp->operation & 0xFF) << 8) | ((arp->operation >> 8) & 0xFF));
+            terminal_writestring(op == ARP_OP_REQUEST ? " request " : " reply   ");
+            shell_write_ip(net_to_host32(arp->target_ip));
+            terminal_writestring(" ? ");
+            shell_write_ip(net_to_host32(arp->sender_ip));
+        }
+        if (tcpdump_remaining > 0) tcpdump_remaining--;
+        return;
+    }
+
+    if (etype == ETH_TYPE_IPV4) {
+        struct ip_header iph;
+        const void* ippl;
+        size_t ippl_len;
+        if (plen < sizeof(struct ip_header)) return;
+        const struct ip_header* rawh = (const struct ip_header*)pl;
+        uint8_t ihl = (uint8_t)((rawh->version_ihl & 0x0F) * 4);
+        if (ihl < sizeof(struct ip_header)) ihl = sizeof(struct ip_header);
+        if (ihl > plen) return;
+        iph.src_ip = net_to_host32(rawh->src_ip);
+        iph.dest_ip = net_to_host32(rawh->dest_ip);
+        iph.protocol = rawh->protocol;
+        ippl = (const uint8_t*)pl + ihl;
+        ippl_len = plen - ihl;
+        if (tcpdump_filter_etype && tcpdump_filter_etype != ETH_TYPE_IPV4) return;
+        if (tcpdump_filter_proto && tcpdump_filter_proto != iph.protocol) return;
+        if (tcpdump_filter_ip && tcpdump_filter_ip != iph.src_ip && tcpdump_filter_ip != iph.dest_ip) return;
+
+        /* Порт-фильтр проверяем ДО вывода, иначе печатается обрубок строки. */
+        uint16_t sport = 0, dport = 0;
+        bool has_ports = false;
+        if (iph.protocol == IP_PROTOCOL_TCP && ippl_len >= 20) {
+            const struct tcp_header* t = (const struct tcp_header*)ippl;
+            sport = net_to_host16(t->src_port);
+            dport = net_to_host16(t->dest_port);
+            has_ports = true;
+        } else if (iph.protocol == IP_PROTOCOL_UDP && ippl_len >= 8) {
+            const struct udp_header* u = (const struct udp_header*)ippl;
+            sport = net_to_host16(u->src_port);
+            dport = net_to_host16(u->dest_port);
+            has_ports = true;
+        }
+        if (tcpdump_filter_port) {
+            if (!has_ports) return;
+            if (tcpdump_filter_port != sport && tcpdump_filter_port != dport) return;
+        }
+
+        terminal_writestring("\n");
+        terminal_writestring(dir ? "out " : "in  ");
+        terminal_writestring("IP ");
+        terminal_writestring(tcpdump_proto_name(iph.protocol));
+        terminal_writestring("  ");
+
+        if (iph.protocol == IP_PROTOCOL_TCP && has_ports) {
+            const struct tcp_header* t = (const struct tcp_header*)ippl;
+            shell_write_ip(iph.src_ip);
+            terminal_putchar('.');
+            shell_write_port(sport);
+            terminal_writestring(" > ");
+            shell_write_ip(iph.dest_ip);
+            terminal_putchar('.');
+            shell_write_port(dport);
+            terminal_writestring(" [");
+            uint8_t fl = t->flags;
+            if (fl & TCP_FLAG_SYN) terminal_writestring("S");
+            if (fl & TCP_FLAG_ACK) terminal_writestring("A");
+            if (fl & TCP_FLAG_PSH) terminal_writestring("P");
+            if (fl & TCP_FLAG_FIN) terminal_writestring("F");
+            if (fl & TCP_FLAG_RST) terminal_writestring("R");
+            terminal_writestring("]");
+        } else if (iph.protocol == IP_PROTOCOL_UDP && has_ports) {
+            shell_write_ip(iph.src_ip);
+            terminal_putchar('.');
+            shell_write_port(sport);
+            terminal_writestring(" > ");
+            shell_write_ip(iph.dest_ip);
+            terminal_putchar('.');
+            shell_write_port(dport);
+        } else if (iph.protocol == IP_PROTOCOL_ICMP && ippl_len >= 8) {
+            const uint8_t* ic = (const uint8_t*)ippl;
+            shell_write_ip(iph.src_ip);
+            terminal_writestring(" > ");
+            shell_write_ip(iph.dest_ip);
+            terminal_writestring(" type=");
+            shell_write_u32(ic[0]);
+        } else {
+            shell_write_ip(iph.src_ip);
+            terminal_writestring(" > ");
+            shell_write_ip(iph.dest_ip);
+        }
+        terminal_writestring("  len=");
+        shell_write_u32((uint32_t)len);
+        if (tcpdump_remaining > 0) tcpdump_remaining--;
+        return;
+    }
+
+    /* Другие ethertype (IPv6 и т.п.) */
+    if (tcpdump_filter_etype && tcpdump_filter_etype != etype) return;
+    static const char hx[] = "0123456789abcdef";
+    terminal_writestring("\n");
+    terminal_writestring(dir ? "out " : "in  ");
+    terminal_writestring("ETH 0x");
+    terminal_putchar(hx[(etype >> 12) & 0xF]);
+    terminal_putchar(hx[(etype >> 8) & 0xF]);
+    terminal_putchar(hx[(etype >> 4) & 0xF]);
+    terminal_putchar(hx[etype & 0xF]);
+    terminal_writestring("  len=");
+    shell_write_u32((uint32_t)len);
+    if (tcpdump_remaining > 0) tcpdump_remaining--;
+}
+
 // Порты для системных операций
 static inline void outb(uint16_t port, uint8_t val) { asm volatile ("outb %0, %1" : : "a"(val), "Nd"(port)); }
 static inline void outw(uint16_t port, uint16_t val) { asm volatile ("outw %0, %1" : : "a"(val), "Nd"(port)); }
@@ -223,6 +459,32 @@ static inline uint8_t inb(uint16_t port) { uint8_t ret; asm volatile ("inb %1, %
 // Вспомогательная функция для цветного вывода
 static inline uint8_t vga_entry_color(enum vga_color fg, enum vga_color bg) {
     return fg | bg << 4;
+}
+
+/* Кладём вшитые user-бинари в /tmp (ramfs): exec читает их как файлы из ФС. */
+static void boot_populate_user_bins(void) {
+    extern char user_demo_start[], user_demo_end[];
+    extern char user_demo2_start[], user_demo2_end[];
+    extern char user_demo3_start[], user_demo3_end[];
+    extern char user_launcher_start[], user_launcher_end[];
+    static const struct {
+        const char* path;
+        char* start;
+        char* end;
+    } bins[] = {
+        { "/tmp/hello.elf",     user_demo_start,    user_demo_end },
+        { "/tmp/demo2.elf",     user_demo2_start,   user_demo2_end },
+        { "/tmp/demo3.elf",     user_demo3_start,   user_demo3_end },
+        { "/tmp/launcher.elf",  user_launcher_start, user_launcher_end },
+    };
+    for (unsigned i = 0; i < sizeof(bins) / sizeof(bins[0]); i++) {
+        size_t sz = (size_t)(bins[i].end - bins[i].start);
+        if (sz == 0) continue;
+        if (ramfs_write(bins[i].path, bins[i].start, sz) != 0) {
+            log_fmt3(LOG_ERR, "boot", "populate_bin_failed", "i", i, "ok", 0u, "x", 0u);
+        }
+    }
+    log_msg(LOG_INFO, "boot", "user bins installed to /tmp");
 }
 
 // Точка входа ядра (multiboot2 info pointer; 0 if unavailable)
@@ -494,6 +756,8 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
     keyboard_init();
     interrupts_enable();
 
+    boot_populate_user_bins();
+
     boot_advance_row();
     if (network_config_apply_boot() == 0 && ip_get_our_ip() != 0) {
         char netmsg[40];
@@ -602,10 +866,57 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
     terminal_putchar('\n');
     terminal_putchar('\n');
 
-    char line[128];
-    size_t line_len = 0;
-    size_t prompt_row = terminal_get_row();
-    size_t prompt_col = 0;
+    /* Инициализация базы пользователей (пароли/права). */
+    if (fs_ready()) {
+        int n = users_init();
+        if (n > 0) {
+            terminal_writestring("Users: ");
+            shell_write_u32((uint32_t)n);
+            terminal_writestring(" loaded\n");
+        }
+        groups_init();
+    }
+
+    /* ==== Консольная сессия 0 (foreground) ==== */
+    g_sessions[0].id = 0;
+    g_sessions[0].used = true;
+    g_sessions[0].uid = 0;
+    g_sessions[0].gid = 0;
+    g_sessions[0].login[0] = 0;
+    g_sessions[0].blen = 0;
+    g_sessions[0].cpos = 0;
+    g_sessions[0].prow = terminal_get_row();
+    g_sessions[0].pcol = 0;
+    strncpy(g_sessions[0].cwd, utils_get_current_directory(), sizeof(g_sessions[0].cwd) - 1);
+    g_sessions[0].tabll = (size_t)-1;
+    g_sessions[0].tabls = (size_t)-1;
+    g_sessions[0].tabci = -1;
+    g_sessions[0].hcnt = 0;
+    g_sessions[0].hpos = -1;
+    g_sessions[0].hhas = false;
+    g_sessions[0].hdlen = 0;
+    strncpy(g_sessions[0].name, "tty0", sizeof(g_sessions[0].name) - 1);
+    g_session_count = 1;
+    g_current_session = 0;
+
+    /* Привязка имени/линий к «текущей сессии» — весь интерактивный код ниже
+       автоматически работает с выбранной сессией (своя история/uid/cwd). */
+    #define line                cur_session()->sbuf
+    #define line_len            cur_session()->blen
+    #define cur_pos             cur_session()->cpos
+    #define prompt_row          cur_session()->prow
+    #define prompt_col          cur_session()->pcol
+    #define tab_last_line_len   cur_session()->tabll
+    #define tab_last_word_start cur_session()->tabls
+    #define tab_cycle_idx       cur_session()->tabci
+    #define shell_history       cur_session()->hist
+    #define shell_history_len   cur_session()->hlen
+    #define shell_history_count cur_session()->hcnt
+    #define shell_history_pos   cur_session()->hpos
+    #define shell_history_draft cur_session()->hdraft
+    #define shell_history_draft_len cur_session()->hdlen
+    #define shell_history_has_draft cur_session()->hhas
+    #define g_login_user        cur_session()->login
 
     auto refresh_status_line = [&]() {
         char mid[96];
@@ -659,18 +970,13 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
         terminal_set_cursor(prompt_row, 0);
         uint8_t old = terminal_getcolor();
         terminal_setcolor(vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK));
-        const char* cwd = utils_get_current_directory();
-        terminal_writestring(cwd ? cwd : "/");
+        const char* uname = g_login_user[0] ? g_login_user : "root";
+        terminal_writestring(uname);
         terminal_setcolor(vga_entry_color(VGA_COLOR_DARK_GREY, VGA_COLOR_BLACK));
-        terminal_writestring(" pid=");
-        shell_write_u32((uint32_t)sched_current_id());
-        terminal_setcolor(vga_entry_color(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK));
         terminal_writestring(" > ");
         terminal_setcolor(old);
         prompt_col = terminal_get_column();
     };
-
-    prompt_print();
 
     auto flush_line = [&]() {
         terminal_putchar('\n');
@@ -684,6 +990,26 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
         terminal_set_cursor(terminal_content_origin(), 0);
         prompt_row = terminal_get_row();
         prompt_print();
+    };
+
+    /* Переключение на консольную сессию n: применяем её uid/gid/cwd/логин,
+       печатаем свежий промпт (буфер строки не переносим — общий экран). */
+    auto switch_session = [&](int n) -> int {
+        if (n < 0 || n >= g_session_count || !g_sessions[n].used) return -1;
+        const char* cur_cwd = utils_get_current_directory();
+        if (cur_cwd) strncpy(cur_session()->cwd, cur_cwd, sizeof(cur_session()->cwd) - 1);
+        g_current_session = n;
+        struct shell_session* s = cur_session();
+        task_setuid_force(s->uid);
+        fs_set_current_uid(s->uid);
+        task_setgid_force(s->gid);
+        fs_set_current_gid(s->gid);
+        utils_set_current_directory(s->cwd[0] ? s->cwd : "/");
+        terminal_writestring("\n");
+        prompt_row = terminal_get_row();
+        line_len = 0;
+        prompt_print();
+        return 0;
     };
     
     /* Keys from IRQ software buffer (KEY_* / ASCII). Never read port 0x60 here. */
@@ -724,7 +1050,92 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
         if (confirm_len == 1 && confirm_line[0]=='y') return true;
         return false;
     };
-    
+
+    // Чтение строки с эхом (имя пользователя и т.п.)
+    auto read_line = [&](char* out, size_t cap) -> bool {
+        size_t len = 0;
+        out[0] = 0;
+        bool full = false;
+        for (;;) {
+            char c = poll_key();
+            if (c == '\n') break;
+            else if (c == '\b') {
+                if (len > 0) {
+                    len--;
+                    terminal_putchar('\b');
+                    terminal_putchar(' ');
+                    terminal_putchar('\b');
+                }
+            } else if (c == 3) { /* Ctrl+C */
+                terminal_writestring("^C\n");
+                return false;
+            } else if (c != 0) {
+                if (len + 1 < cap) {
+                    out[len++] = c;
+                    terminal_putchar(c);
+                } else {
+                    full = true; /* буфер полон — дочитываем строку, отбрасывая лишнее */
+                }
+            }
+        }
+        (void)full;
+        out[len] = 0;
+        terminal_putchar('\n');
+        return true;
+    };
+
+    // Чтение пароля без эха.
+    auto read_password = [&](char* out, size_t cap) -> bool {
+        size_t len = 0;
+        out[0] = 0;
+        for (;;) {
+            char c = poll_key();
+            if (c == '\n') break;
+            else if (c == '\b') {
+                if (len > 0) len--;
+            } else if (c == 3) { /* Ctrl+C */
+                terminal_writestring("^C\n");
+                return false;
+            } else if (c != 0) {
+                if (len + 1 < cap) out[len++] = c; /* не эхо; лишнее отбрасываем */
+            }
+        }
+        out[len] = 0;
+        terminal_putchar('\n');
+        return true;
+    };
+
+    /* Экран авторизации: запрашивает пользователя и пароль, проверяет через
+       /etc/passwd + /etc/shadow. Циклится, пока не успешно. */
+    auto do_login_prompt = [&]() -> bool {
+        for (;;) {
+            terminal_writestring("\nKnitOS login: ");
+            char uname[UNAME_MAX];
+            if (!read_line(uname, sizeof(uname))) { /* Ctrl+C — показать снова */ }
+            if (uname[0] == 0) continue;
+            const struct user_record* u = user_by_name(uname);
+            if (!u) { terminal_writestring("\nLogin incorrect"); continue; }
+            terminal_writestring("Password: ");
+            char pw[64];
+            if (!read_password(pw, sizeof(pw))) { terminal_writestring("\nLogin incorrect"); continue; }
+            if (!user_check_password(uname, pw)) { terminal_writestring("\nLogin incorrect"); continue; }
+            task_setuid_force(u->uid);
+            fs_set_current_uid(u->uid);
+            task_setgid_force(u->gid);
+            fs_set_current_gid(u->gid);
+            strncpy(g_login_user, u->name, UNAME_MAX - 1);
+            g_login_user[UNAME_MAX - 1] = 0;
+            cur_session()->uid = u->uid;
+            cur_session()->gid = u->gid;
+            struct fs_stat hst;
+            if (fs_stat(u->home, &hst) == 0 && (hst.flags & FS_FLAG_DIRECTORY)) {
+                utils_set_current_directory(u->home);
+            }
+            strncpy(cur_session()->cwd, utils_get_current_directory(), sizeof(cur_session()->cwd) - 1);
+            return true;
+        }
+    };
+
     // Перезагрузка через keyboard controller
     auto reboot = [&]() {
         if (!confirm_action("reboot")) {
@@ -780,30 +1191,29 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
         }
         if (len==0) { flush_line(); return; }
         
-        // Парсинг аргументов
+        // Парсинг аргументов. Копируем в отдельный буфер с NUL-терминацией:
+        // иначе argv[i] тянул бы за собой остаток строки (баг «useradd a 1001»).
+        char argbuf[160];
         const char* argv[32];
         int argc = 0;
         size_t i = 0;
-        while (i < len && argc < 31) {
-            // Пропускаем пробелы
+        size_t ab = 0;
+        while (i < len && argc < 31 && ab + 1 < sizeof(argbuf)) {
             while (i < len && cmd[i] == ' ') i++;
             if (i >= len) break;
-            
-            argv[argc++] = cmd + i;
-            // Находим конец аргумента
-            while (i < len && cmd[i] != ' ') i++;
+            argv[argc++] = argbuf + ab;
+            while (i < len && cmd[i] != ' ' && ab + 1 < sizeof(argbuf))
+                argbuf[ab++] = cmd[i++];
+            argbuf[ab++] = 0;
         }
         argv[argc] = 0;
         
         if (argc == 0) { flush_line(); return; }
         
-        // Извлекаем имя команды (находим длину до пробела или конца строки)
+        // Извлекаем имя команды
         const char* cmd_name = argv[0];
         size_t cmd_name_len = 0;
-        size_t cmd_start = argv[0] - cmd; // Позиция начала команды в исходной строке
-        while (cmd_start + cmd_name_len < len && cmd[cmd_start + cmd_name_len] != ' ' && cmd[cmd_start + cmd_name_len] != 0) {
-            cmd_name_len++;
-        }
+        while (cmd_name[cmd_name_len]) cmd_name_len++;
         
         // Команда help (и ?)
         if ((cmd_name_len==4 && cmd_name[0]=='h'&&cmd_name[1]=='e'&&cmd_name[2]=='l'&&cmd_name[3]=='p') ||
@@ -818,6 +1228,11 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
             terminal_writestring("\n  chmod <mode> <path>   chown <uid> <path>   touch <path>");
             terminal_writestring("\n  df   du <path>   sync   mount   fsck");
             terminal_writestring("\nSystem:");
+            terminal_writestring("\n  login [user]  logout  whoami  id  users");
+            terminal_writestring("\n  useradd <name> [uid]  userdel <name>  usermod <name> [newname uid gid]");
+            terminal_writestring("\n  groupadd <name> [gid]  groups [user]  passwd [user]  su [user]");
+            terminal_writestring("\n  chmod <mode> <path>  chown <uid> <path>  chgrp <gid> <path>");
+            terminal_writestring("\n  sessions  session <n>  newsession <name>  (independent terminals)");
             terminal_writestring("\n  clear   echo   version   date   setdate YYYY-MM-DD   settime HH:MM:SS");
             terminal_writestring("\n  runelf hello   disk   reboot   shutdown  poweroff");
             terminal_writestring("\n  acpi                  show ACPI tables info (S5, reset)");
@@ -825,7 +1240,8 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
             terminal_writestring("\n  kill [-9] <pid>         terminate kthread (not systemd/idle)");
             terminal_writestring("\n  resolution <H>   log [off|err|info|debug]");
             terminal_writestring("\nNetwork:");
-            terminal_writestring("\n  network   dhcp   ping <host>   httpget <host>");
+            terminal_writestring("\n  network   ifconfig   dhcp   ping <host>   traceroute <host>   tcpdump [filters]");
+            terminal_writestring("\n  hostname [name]        show/set DHCP hostname");
             terminal_writestring("\n  network save|reload|static <ip> [gw] [dns] [mask]");
             terminal_writestring("\n  udp/tcp/udplisten/tcp listen   dns   arp   route   netstat");
             terminal_writestring("\n  ports                 TCP/UDP table (port, state, pid, process)");
@@ -875,6 +1291,304 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
         if (cmd_name_len==3 && cmd_name[0]=='p'&&cmd_name[1]=='w'&&cmd_name[2]=='d') {
             terminal_writestring("\n");
             terminal_writestring(utils_get_current_directory());
+            flush_line(); return;
+        }
+
+        // Команда login - авторизация на консоли
+        if (cmd_name_len==5 && cmd_name[0]=='l'&&cmd_name[1]=='o'&&cmd_name[2]=='g'&&cmd_name[3]=='i'&&cmd_name[4]=='n') {
+            char uname[UNAME_MAX];
+            const char* target = 0;
+            if (argc >= 2) {
+                target = argv[1];
+            } else {
+                terminal_writestring("\nlogin: ");
+                if (!read_line(uname, sizeof(uname))) { flush_line(); return; }
+                target = uname;
+            }
+            const struct user_record* u = user_by_name(target);
+            if (!u) {
+                terminal_writestring("\nlogin: unknown user: ");
+                terminal_writestring(target);
+            } else {
+                terminal_writestring("\nPassword: ");
+                char pw[64];
+                if (!read_password(pw, sizeof(pw))) { flush_line(); return; }
+                if (user_check_password(target, pw)) {
+                    task_setuid_force(u->uid);
+                    fs_set_current_uid(u->uid);
+                    task_setgid_force(u->gid);
+                    fs_set_current_gid(u->gid);
+                    strncpy(g_login_user, u->name, UNAME_MAX - 1);
+                    g_login_user[UNAME_MAX - 1] = 0;
+                    cur_session()->uid = u->uid;
+                    cur_session()->gid = u->gid;
+                    /* Переходим в домашнюю директорию, если она существует. */
+                    struct fs_stat hst;
+                    if (fs_stat(u->home, &hst) == 0 && (hst.flags & FS_FLAG_DIRECTORY)) {
+                        utils_set_current_directory(u->home);
+                    }
+                    strncpy(cur_session()->cwd, utils_get_current_directory(), sizeof(cur_session()->cwd) - 1);
+                    terminal_writestring("\nWelcome, ");
+                    terminal_writestring(u->name);
+                } else {
+                    terminal_writestring("\nlogin: incorrect password");
+                }
+            }
+            flush_line(); return;
+        }
+
+        // Команда logout - завершение сессии
+        if (cmd_name_len==6 && cmd_name[0]=='l'&&cmd_name[1]=='o'&&cmd_name[2]=='g'&&cmd_name[3]=='o'&&cmd_name[4]=='u'&&cmd_name[5]=='t') {
+            task_setuid_force(0);
+            fs_set_current_uid(0);
+            task_setgid_force(0);
+            fs_set_current_gid(0);
+            g_login_user[0] = 0;
+            cur_session()->uid = 0;
+            cur_session()->gid = 0;
+            utils_set_current_directory("/");
+            strncpy(cur_session()->cwd, "/", sizeof(cur_session()->cwd) - 1);
+            terminal_writestring("\nLogged out");
+            do_login_prompt();
+            prompt_row = terminal_get_row();
+            line_len = 0;
+            prompt_print();
+            return;
+        }
+
+        // Команда whoami
+        if (cmd_name_len==6 && cmd_name[0]=='w'&&cmd_name[1]=='h'&&cmd_name[2]=='o'&&cmd_name[3]=='a'&&cmd_name[4]=='m'&&cmd_name[5]=='i') {
+            uint16_t uid = fs_current_uid();
+            terminal_writestring("\n");
+            if (g_login_user[0]) terminal_writestring(g_login_user);
+            else if (uid == 0) terminal_writestring("root");
+            else terminal_writestring("?");
+            terminal_writestring(" uid="); shell_write_u32((uint32_t)uid);
+            terminal_writestring(" gid="); shell_write_u32((uint32_t)fs_current_gid());
+            flush_line(); return;
+        }
+
+        // Команда id - uid/gid/группа
+        if (cmd_name_len==2 && cmd_name[0]=='i'&&cmd_name[1]=='d') {
+            uint16_t uid = fs_current_uid();
+            uint16_t gid = fs_current_gid();
+            terminal_writestring("\nuid=");
+            shell_write_u32((uint32_t)uid);
+            terminal_writestring(" gid=");
+            shell_write_u32((uint32_t)gid);
+            if (g_login_user[0]) { terminal_writestring(" ("); terminal_writestring(g_login_user); terminal_writestring(")"); }
+            terminal_writestring(" groups=");
+            shell_write_u32((uint32_t)gid);
+            flush_line(); return;
+        }
+
+        // Команда users - список пользователей
+        if (cmd_name_len==5 && cmd_name[0]=='u'&&cmd_name[1]=='s'&&cmd_name[2]=='e'&&cmd_name[3]=='r'&&cmd_name[4]=='s') {
+            user_auth_dump();
+            flush_line(); return;
+        }
+
+        // Команда sessions - список консольных сессий
+        if (cmd_name_len==8 && strncmp(cmd_name, "sessions", 8) == 0) {
+            terminal_writestring("\n=== Sessions ===");
+            for (int i = 0; i < SESS_MAX; i++) {
+                struct shell_session* s = &g_sessions[i];
+                if (!s->used) continue;
+                terminal_writestring("\n  [");
+                if (i == g_current_session) terminal_writestring("*");
+                else terminal_writestring(" ");
+                { char num[8]; int np=0; int v=i; if(v==0)num[np++]='0'; else {char tmp[8];int t=0;while(v>0){tmp[t++]='0'+(v%10);v/=10;}while(t>0)num[np++]=tmp[--t];} num[np]=0; terminal_writestring(num); }
+                terminal_writestring("] ");
+                terminal_writestring(s->name);
+                terminal_writestring("  uid=");
+                shell_write_u32(s->uid);
+                terminal_writestring(" user=");
+                terminal_writestring(s->login[0] ? s->login : "root");
+                terminal_writestring(" cwd=");
+                terminal_writestring(s->cwd[0] ? s->cwd : "/");
+                terminal_writestring(" hist=");
+                shell_write_u32((uint32_t)s->hcnt);
+            }
+            terminal_writestring("\nUsage: session <n> | newsession <name>");
+            flush_line(); return;
+        }
+
+        // Команда newsession - создать новую независимую сессию (только root)
+        if (cmd_name_len==10 && strncmp(cmd_name, "newsession", 10) == 0) {
+            if (fs_current_uid() != 0) { terminal_writestring("\nnewsession: permission denied"); flush_line(); return; }
+            int slot = -1;
+            for (int i = 0; i < SESS_MAX; i++) if (!g_sessions[i].used) { slot = i; break; }
+            if (slot < 0) { terminal_writestring("\nnewsession: no free slots"); flush_line(); return; }
+            struct shell_session* s = &g_sessions[slot];
+            memset(s, 0, sizeof(*s));
+            s->id = slot;
+            s->used = true;
+            s->uid = 0;
+            s->gid = 0;
+            s->login[0] = 0;
+            s->hcnt = 0;
+            s->hpos = -1;
+            s->tabll = (size_t)-1;
+            s->tabci = -1;
+            char nm[16];
+            if (argc >= 2) strncpy(nm, argv[1], sizeof(nm) - 1);
+            else { size_t k = 0; const char* base = "tty"; while (base[k] && k < 10) { nm[k] = base[k]; k++; } char dn[4]; int t=0; int v=slot; if(v==0)dn[t++]='0'; else {char tb[4];int tc=0;while(v>0){tb[tc++]='0'+(v%10);v/=10;}while(tc>0)dn[t++]=tb[--tc];} dn[t]=0; size_t j=0; while(dn[j] && k < 15) nm[k++] = dn[j++]; nm[k]=0; }
+            strncpy(s->name, nm, sizeof(s->name) - 1);
+            strncpy(s->cwd, "/", sizeof(s->cwd) - 1);
+            g_session_count++;
+            terminal_writestring("\nSession created ");
+            terminal_writestring(s->name);
+            terminal_writestring(" (");
+            { char num[8]; int np=0; int v=slot; if(v==0)num[np++]='0'; else {char tmp[8];int t=0;while(v>0){tmp[t++]='0'+(v%10);v/=10;}while(t>0)num[np++]=tmp[--t];} num[np]=0; terminal_writestring(num); }
+            terminal_writestring(")");
+            flush_line(); return;
+        }
+
+        // Команда session - переключение на сессию
+        if (cmd_name_len==7 && strncmp(cmd_name, "session", 7) == 0) {
+            if (argc < 2) { terminal_writestring("\nUsage: session <n>"); flush_line(); return; }
+            int n = 0;
+            const char* us = argv[1];
+            while (*us >= '0' && *us <= '9') { n = n * 10 + (*us - '0'); us++; }
+            if (switch_session(n) != 0) { terminal_writestring("\nsession: invalid slot"); flush_line(); return; }
+            return; /* switch_session уже напечатал промпт — без flush_line */
+        }
+
+        // Команда groupadd - создать группу (только root)
+        if (cmd_name_len==8 && strncmp(cmd_name, "groupadd", 8) == 0) {
+            if (fs_current_uid() != 0) { terminal_writestring("\ngroupadd: permission denied"); flush_line(); return; }
+            if (argc < 2) { terminal_writestring("\nUsage: groupadd <name> [gid]"); flush_line(); return; }
+            uint16_t gid = 0;
+            if (argc >= 3) { const char* gs = argv[2]; while (*gs >= '0' && *gs <= '9') { gid = (uint16_t)(gid * 10 + (*gs - '0')); gs++; } }
+            if (group_add(argv[1], gid) != 0) { terminal_writestring("\ngroupadd: failed (exists/full)"); flush_line(); return; }
+            const struct group_record* g = group_by_name(argv[1]);
+            terminal_writestring("\nGroup ");
+            terminal_writestring(argv[1]);
+            terminal_writestring(" added, gid=");
+            shell_write_u32(g ? g->gid : 0);
+            flush_line(); return;
+        }
+
+        // Команда userdel - удалить пользователя (только root)
+        if (cmd_name_len==7 && strncmp(cmd_name, "userdel", 7) == 0) {
+            if (fs_current_uid() != 0) { terminal_writestring("\nuserdel: permission denied"); flush_line(); return; }
+            if (argc < 2) { terminal_writestring("\nUsage: userdel <name>"); flush_line(); return; }
+            if (user_del(argv[1]) != 0) { terminal_writestring("\nuserdel: failed (root or not found)"); flush_line(); return; }
+            terminal_writestring("\nUser ");
+            terminal_writestring(argv[1]);
+            terminal_writestring(" deleted");
+            flush_line(); return;
+        }
+
+        // Команда usermod - изменить пользователя (только root)
+        if (cmd_name_len==7 && strncmp(cmd_name, "usermod", 7) == 0) {
+            if (fs_current_uid() != 0) { terminal_writestring("\nusermod: permission denied"); flush_line(); return; }
+            if (argc < 2) { terminal_writestring("\nUsage: usermod <name> [newname] [uid] [gid]"); flush_line(); return; }
+            const char* nn = (argc >= 3) ? argv[2] : 0;
+            uint16_t nuid = 0, ngid = 0;
+            if (argc >= 4) { const char* us = argv[3]; while (*us >= '0' && *us <= '9') { nuid = (uint16_t)(nuid * 10 + (*us - '0')); us++; } }
+            if (argc >= 5) { const char* gs = argv[4]; while (*gs >= '0' && *gs <= '9') { ngid = (uint16_t)(ngid * 10 + (*gs - '0')); gs++; } }
+            if (user_mod(argv[1], nn, nuid, ngid, 0) != 0) { terminal_writestring("\nusermod: failed"); flush_line(); return; }
+            terminal_writestring("\nUser modified");
+            flush_line(); return;
+        }
+
+        // Команда groups - список групп пользователя
+        if (cmd_name_len==6 && strncmp(cmd_name, "groups", 6) == 0) {
+            const char* user = (argc >= 2) ? argv[1] : (g_login_user[0] ? g_login_user : "root");
+            const struct user_record* u = user_by_name(user);
+            terminal_writestring("\n");
+            terminal_writestring(user);
+            terminal_writestring(" : ");
+            const struct group_record* pg = u ? group_by_gid(u->gid) : 0;
+            if (pg) terminal_writestring(pg->name);
+            /* + членства из group's members (кроме основной группы) */
+            for (int i = 0; i < groups_count(); i++) {
+                const struct group_record* g = groups_get(i);
+                if (!g || !g->valid) continue;
+                if (u && g->gid != u->gid && csv_has_token(g->members, user)) {
+                    terminal_writestring(" ");
+                    terminal_writestring(g->name);
+                }
+            }
+            flush_line(); return;
+        }
+
+        // Команда su - временный root/su (с паролем)
+        if (cmd_name_len==2 && cmd_name[0]=='s'&&cmd_name[1]=='u') {
+            const char* target = (argc >= 2) ? argv[1] : "root";
+            const struct user_record* u = user_by_name(target);
+            if (!u) { terminal_writestring("\nsu: unknown user"); flush_line(); return; }
+            terminal_writestring("\nPassword: ");
+            char pw[64];
+            if (!read_password(pw, sizeof(pw))) { flush_line(); return; }
+            if (!user_check_password(target, pw)) { terminal_writestring("\nsu: incorrect password"); flush_line(); return; }
+            task_setuid_force(u->uid);
+            fs_set_current_uid(u->uid);
+            task_setgid_force(u->gid);
+            fs_set_current_gid(u->gid);
+            strncpy(g_login_user, u->name, UNAME_MAX - 1);
+            g_login_user[UNAME_MAX - 1] = 0;
+            cur_session()->uid = u->uid;
+            cur_session()->gid = u->gid;
+            struct fs_stat hst;
+            if (fs_stat(u->home, &hst) == 0 && (hst.flags & FS_FLAG_DIRECTORY)) utils_set_current_directory(u->home);
+            strncpy(cur_session()->cwd, utils_get_current_directory(), sizeof(cur_session()->cwd) - 1);
+            terminal_writestring("\n");
+            terminal_writestring(target);
+            terminal_writestring(" shell");
+            flush_line(); return;
+        }
+
+        // Команда useradd - создать пользователя (только root)
+        if (cmd_name_len==7 && (strncmp(cmd_name, "useradd", 7) == 0)) {
+            if (fs_current_uid() != 0) { terminal_writestring("\nuseradd: permission denied"); flush_line(); return; }
+            if (argc < 2) { terminal_writestring("\nUsage: useradd <name> [uid]"); flush_line(); return; }
+            uint16_t uid = 0;
+            if (argc >= 3) {
+                const char* us = argv[2];
+                while (*us >= '0' && *us <= '9') { uid = (uint16_t)(uid * 10 + (*us - '0')); us++; }
+            }
+            char full_home[UHOME_MAX + 16];
+            size_t k = 0;
+            const char* h = "/home/";
+            size_t hi = 0;
+            while (h[hi] && k + 1 < sizeof(full_home)) full_home[k++] = h[hi++];
+            size_t j = 0;
+            while (argv[1][j] && k + 1 < sizeof(full_home)) full_home[k++] = argv[1][j++];
+            full_home[k] = 0;
+            fs_create_dir(full_home);
+            int nuid = user_add(argv[1], uid, uid, full_home);
+            if (nuid < 0) { terminal_writestring("\nuseradd: failed (exists or full)"); flush_line(); return; }
+            /* Отдаём home новому пользователю сразу (иначе он не сможет писать до ребута). */
+            fs_chown(full_home, (uint16_t)nuid, (uint16_t)nuid);
+            terminal_writestring("\nUser ");
+            terminal_writestring(argv[1]);
+            terminal_writestring(" added, uid=");
+            shell_write_u32((uint32_t)nuid);
+            terminal_writestring("\nNext: passwd <name> to set password");
+            flush_line(); return;
+        }
+
+        // Команда passwd - сменить пароль
+        if (cmd_name_len==6 && strncmp(cmd_name, "passwd", 6) == 0) {
+            const char* target = g_login_user[0] ? g_login_user : "root";
+            if (argc >= 2) {
+                if (fs_current_uid() != 0 && strcmp(argv[1], target) != 0) {
+                    terminal_writestring("\npasswd: permission denied"); flush_line(); return;
+                }
+                target = argv[1];
+            }
+            if (!user_by_name(target)) { terminal_writestring("\npasswd: unknown user"); flush_line(); return; }
+            terminal_writestring("\nNew password: ");
+            char pw[64], pw2[64];
+            if (!read_password(pw, sizeof(pw))) { flush_line(); return; }
+            terminal_writestring("Confirm password: ");
+            if (!read_password(pw2, sizeof(pw2))) { flush_line(); return; }
+            if (strcmp(pw, pw2) != 0) { terminal_writestring("\npasswd: passwords do not match"); flush_line(); return; }
+            if (user_set_password(target, pw) != 0) { terminal_writestring("\npasswd: failed"); flush_line(); return; }
+            terminal_writestring("\nPassword updated for ");
+            terminal_writestring(target);
             flush_line(); return;
         }
         
@@ -1236,7 +1950,7 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
             }
         }
         
-        if (len>=3 && cmd[0]=='r'&&cmd[1]=='m'&&(len==2 || cmd[2]==' ')) {
+        if (len>=2 && cmd[0]=='r'&&cmd[1]=='m'&&(len==2 || cmd[2]==' ')) {
             bool recursive = false;
             size_t i = 2;
             while (i < len && cmd[i]==' ') i++;
@@ -1368,7 +2082,32 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
             if (!fn || uid == 0xFFFF || utils_resolve_path(filename, fullpath, sizeof(fullpath))) {
                 terminal_writestring("\nUsage: chown <uid> <path>"); flush_line(); return;
             }
-            terminal_writestring(fs_chown(fullpath, uid, 0)==0 ? "\nOK" : "\nchown failed");
+            /* Сохраняем существующий gid (chown меняет только владельца). */
+            uint16_t keep_gid = 0;
+            struct fs_stat cst;
+            if (fs_stat(fullpath, &cst) == 0) keep_gid = cst.gid;
+            terminal_writestring(fs_chown(fullpath, uid, keep_gid)==0 ? "\nOK" : "\nchown failed");
+            flush_line(); return;
+        }
+        if (len>=6 && cmd[0]=='c'&&cmd[1]=='h'&&cmd[2]=='g'&&cmd[3]=='r'&&cmd[4]=='p'&&cmd[5]==' ') {
+            char gid_s[16]; int gn=0; size_t i=6;
+            while (i<len && cmd[i]!=' ' && gn<15) gid_s[gn++]=cmd[i++];
+            gid_s[gn]=0;
+            while (i<len && cmd[i]==' ') i++;
+            char filename[64]; int fn=0;
+            while (i<len && fn<63) filename[fn++]=cmd[i++];
+            filename[fn]=0;
+            char fullpath[128];
+            uint16_t gid = 0;
+            bool bad=false;
+            for (int k=0; gid_s[k]; k++) {
+                if (gid_s[k] < '0' || gid_s[k] > '9') { bad=true; break; }
+                gid = (uint16_t)(gid * 10 + (gid_s[k] - '0'));
+            }
+            if (!fn || bad || utils_resolve_path(filename, fullpath, sizeof(fullpath))) {
+                terminal_writestring("\nUsage: chgrp <gid> <path>"); flush_line(); return;
+            }
+            terminal_writestring(fs_chgrp(fullpath, gid)==0 ? "\nOK" : "\nchgrp failed (root/owner)");
             flush_line(); return;
         }
         if (len>=6 && cmd[0]=='t'&&cmd[1]=='o'&&cmd[2]=='u'&&cmd[3]=='c'&&cmd[4]=='h'&&cmd[5]==' ') {
@@ -1581,6 +2320,7 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
             extern char user_demo_start[], user_demo_end[];
             extern char user_demo2_start[], user_demo2_end[];
             extern char user_demo3_start[], user_demo3_end[];
+            extern char user_launcher_start[], user_launcher_end[];
             const char* arg = cmd + 7;
             const char* which = 0;
             char* start = 0;
@@ -1596,9 +2336,12 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
             } else if (alen >= 5 && arg[0]=='d'&&arg[1]=='e'&&arg[2]=='m'&&arg[3]=='o'&&arg[4]=='3') {
                 which = "demo3";
                 start = user_demo3_start; end = user_demo3_end; name = "demo3";
+            } else if (alen >= 8 && arg[0]=='l'&&arg[1]=='a'&&arg[2]=='u'&&arg[3]=='n'&&arg[4]=='c'&&arg[5]=='h'&&arg[6]=='e'&&arg[7]=='r') {
+                which = "launcher";
+                start = user_launcher_start; end = user_launcher_end; name = "launcher";
             }
             if (!which) {
-                terminal_writestring("\nUsage: runelf hello|demo2|demo3");
+                terminal_writestring("\nUsage: runelf hello|demo2|demo3|launcher");
                 flush_line(); return;
             }
             size_t sz = (size_t)(end - start);
@@ -1827,6 +2570,80 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
             flush_line(); return;
         }
 
+        // Команда ifconfig - показ интерфейсов (Linux-like, per-interface)
+        if (len >= 8 && cmd_name_len == 8 &&
+            cmd_name[0]=='i'&&cmd_name[1]=='f'&&cmd_name[2]=='c'&&cmd_name[3]=='o'&&
+            cmd_name[4]=='n'&&cmd_name[5]=='f'&&cmd_name[6]=='i'&&cmd_name[7]=='g') {
+            int n = netif_count();
+            if (n == 0) {
+                terminal_writestring("\nNo network interfaces");
+                flush_line(); return;
+            }
+            uint32_t g_ip = ip_get_our_ip();
+            uint32_t g_mask = ip_get_subnet_mask();
+            uint32_t g_gw = ip_get_gateway();
+
+            for (int idx = 0; idx < n; idx++) {
+                struct netif* nif = netif_get(idx);
+                if (!nif) continue;
+                uint32_t ip = nif->ip ? nif->ip : g_ip;
+                uint32_t mask = nif->netmask ? nif->netmask : g_mask;
+                uint32_t gw = nif->gateway ? nif->gateway : g_gw;
+
+                terminal_writestring("\n");
+                terminal_writestring(nif->name);
+                terminal_writestring(": flags=");
+                terminal_writestring(nif->up ? "UP" : "DOWN");
+                terminal_writestring(",BROADCAST,RUNNING,MULTICAST");
+                terminal_writestring("  mtu ");
+                shell_write_u32(nif->mtu);
+                terminal_writestring("  hwtype ");
+                switch (nif->hw_type) {
+                    case NETIF_HW_VIRTIO: terminal_writestring("virtio"); break;
+                    case NETIF_HW_PCNET:  terminal_writestring("pcnet");  break;
+                    case NETIF_HW_RTL8139: terminal_writestring("rtl8139"); break;
+                    default: terminal_writestring("unknown"); break;
+                }
+
+                terminal_writestring("\n        inet ");
+                if (ip) shell_write_ip(ip); else terminal_writestring("unset");
+                terminal_writestring("  netmask ");
+                if (mask) shell_write_ip(mask); else terminal_writestring("unset");
+                terminal_writestring("\n        inet6 ::1/128  scope host");
+                terminal_writestring("\n        ether ");
+                for (int i = 0; i < 6; i++) {
+                    if (i > 0) terminal_putchar(':');
+                    uint8_t b = nif->mac[i];
+                    char hex[3];
+                    uint8_t hi = (b >> 4) & 0xF, lo = b & 0xF;
+                    hex[0] = (char)(hi < 10 ? '0' + hi : 'A' + hi - 10);
+                    hex[1] = (char)(lo < 10 ? '0' + lo : 'A' + lo - 10);
+                    hex[2] = 0;
+                    terminal_writestring(hex);
+                }
+                if (gw) {
+                    terminal_writestring("  gateway ");
+                    shell_write_ip(gw);
+                }
+                terminal_writestring("\n        RX packets ");
+                shell_write_u32(nif->stats.rx_packets);
+                terminal_writestring("  bytes ");
+                shell_write_u32(nif->stats.rx_bytes);
+                terminal_writestring("  dropped ");
+                shell_write_u32(nif->stats.rx_dropped);
+                terminal_writestring("\n        TX packets ");
+                shell_write_u32(nif->stats.tx_packets);
+                terminal_writestring("  bytes ");
+                shell_write_u32(nif->stats.tx_bytes);
+                terminal_writestring("  errors ");
+                shell_write_u32(nif->stats.tx_errors);
+                terminal_writestring("  irq ");
+                shell_write_u32(nif->stats.irq_count);
+            }
+            terminal_writestring("\n");
+            flush_line(); return;
+        }
+
         // Команда log - уровень serial-лога (COM1 -> logs/qemu-serial.log на хосте)
         if (len == 3 && cmd[0] == 'l' && cmd[1] == 'o' && cmd[2] == 'g') {
             terminal_writestring("\nSerial log level: ");
@@ -1977,6 +2794,38 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
                 shell_write_ip(ip_get_our_ip());
             } else {
                 terminal_writestring("\n[DHCP] Failed to acquire IP address");
+            }
+            flush_line(); return;
+        }
+        
+        // Команда hostname [name] - показать/сменить имя устройства (DHCP option 12)
+        if (len >= 8 && cmd[0]=='h'&&cmd[1]=='o'&&cmd[2]=='s'&&cmd[3]=='t'&&cmd[4]=='n'&&cmd[5]=='a'&&cmd[6]=='m'&&cmd[7]=='e') {
+            if (len == 8) {
+                // hostname — показать текущий
+                terminal_writestring("\nHostname: ");
+                terminal_writestring(dhcp_get_hostname());
+            } else if (cmd[8] == ' ' && len > 9) {
+                // hostname <name> — установить
+                char new_name[32];
+                size_t nlen = len - 9;
+                if (nlen >= sizeof(new_name)) nlen = sizeof(new_name) - 1;
+                for (size_t i = 0; i < nlen; i++) new_name[i] = cmd[9 + i];
+                new_name[nlen] = 0;
+                dhcp_set_hostname(new_name);
+                terminal_writestring("\nHostname set to: ");
+                terminal_writestring(new_name);
+                terminal_writestring("\nDHCP release + renew...");
+                dhcp_release();
+                if (dhcp_acquire() == 0) {
+                    network_config_save();
+                    terminal_writestring(" OK (IP: ");
+                    shell_write_ip(ip_get_our_ip());
+                    terminal_writestring(")");
+                } else {
+                    terminal_writestring(" failed");
+                }
+            } else {
+                terminal_writestring("\nUsage: hostname [name]");
             }
             flush_line(); return;
         }
@@ -2331,6 +3180,200 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
             flush_line(); return;
         }
 
+        // Команда traceroute - путь до хоста через ICMP с растущим TTL
+        const char pref_traceroute[]="traceroute ";
+        if (len>=12) {
+            bool ok=true; for(int i=0;i<11;i++) if(cmd[i]!=pref_traceroute[i]) {ok=false; break;}
+            if (ok) {
+                size_t i = 11;
+                while (i < len && cmd[i] == ' ') i++;
+                const char* host_str = cmd + i;
+                size_t host_len = 0;
+                while (i + host_len < len && cmd[i + host_len] != ' ') host_len++;
+
+                if (ip_get_our_ip() == 0) {
+                    terminal_writestring("\nNo IP address configured (run dhcp first)");
+                    flush_line(); return;
+                }
+
+                uint32_t dest_ip = 0;
+                if (host_len == 0 || net_resolve_host(host_str, host_len, &dest_ip) != 0) {
+                    terminal_writestring("\nInvalid host or DNS resolution failed");
+                    terminal_writestring("\nUsage: traceroute <ip|hostname>");
+                    flush_line(); return;
+                }
+
+                char ip_buf[20];
+                terminal_writestring("\ntraceroute to ");
+                for (size_t j = 0; j < host_len; j++) terminal_putchar(host_str[j]);
+                terminal_writestring(" (");
+                ip_format_address(dest_ip, ip_buf, sizeof(ip_buf));
+                terminal_writestring(ip_buf);
+                terminal_writestring("), max 30 hops");
+
+                for (int ttl = 1; ttl <= 30; ttl++) {
+                    terminal_writestring("\n ");
+                    char num[8]; int np = 0;
+                    int v = ttl;
+                    if (v < 10) num[np++] = ' ';
+                    if (v == 0) num[np++] = '0';
+                    else {
+                        char tmp[8]; int t = 0;
+                        while (v > 0) { tmp[t++] = '0' + (v % 10); v /= 10; }
+                        while (t > 0) num[np++] = tmp[--t];
+                    }
+                    num[np] = 0;
+                    terminal_writestring(num);
+                    terminal_writestring("  ");
+
+                    int kind = 0;
+                    uint32_t from = 0;
+                    uint32_t rtt = 0;
+                    int rc = icmp_probe_to(dest_ip, ttl, 1000, &kind, &from, &rtt);
+                    if (rc < 0) {
+                        if (rc == -1) {
+                            terminal_writestring("(send error)");
+                            flush_line(); return;
+                        }
+                        terminal_writestring("*");
+                        continue;
+                    }
+
+                    ip_format_address(from, ip_buf, sizeof(ip_buf));
+                    terminal_writestring(ip_buf);
+                    terminal_writestring("  ");
+                    np = 0;
+                    v = (int)rtt;
+                    if (v == 0) num[np++] = '0';
+                    else {
+                        char tmp[8]; int t = 0;
+                        while (v > 0) { tmp[t++] = '0' + (v % 10); v /= 10; }
+                        while (t > 0) num[np++] = tmp[--t];
+                    }
+                    num[np] = 0;
+                    terminal_writestring(num);
+                    terminal_writestring("ms");
+
+                    if (kind == ICMP_TYPE_ECHO_REPLY) {
+                        terminal_writestring("  [destination reached]");
+                        break;
+                    }
+                    if (kind == ICMP_TYPE_DEST_UNREACH) {
+                        terminal_writestring("  [unreachable]");
+                        break;
+                    }
+                }
+                flush_line(); return;
+            }
+        }
+
+        // Команда tcpdump - захват фреймов (in/out) с фильтрами
+        // tcpdump [count] [tcp|udp|icmp|arp|ip] [port N] [host IP]
+        const char pref_tcpdump[]="tcpdump";
+        size_t tl = 0;
+        while (pref_tcpdump[tl]) tl++;
+        if (len >= tl && cmd_name_len >= tl &&
+            (cmd_name_len == tl || cmd_name[tl] == ' ')) {
+            bool ok = true;
+            for (int i = 0; i < (int)tl; i++) if (cmd[i] != pref_tcpdump[i]) { ok = false; break; }
+            if (ok) {
+                int count = 20;
+                tcpdump_filter_etype = 0;
+                tcpdump_filter_proto = 0;
+                tcpdump_filter_ipv4 = false;
+                tcpdump_filter_port = 0;
+                tcpdump_filter_ip = 0;
+
+                bool bad = false;
+                size_t di = tl;
+                size_t pos = tl;
+                while (di < len && cmd[di] == ' ') di++;
+                if (di < len && cmd[di] >= '0' && cmd[di] <= '9') {
+                    int c = 0;
+                    while (di < len && cmd[di] >= '0' && cmd[di] <= '9') {
+                        c = c * 10 + (cmd[di] - '0');
+                        di++;
+                    }
+                    if (c >= 1 && c <= 200) count = c;
+                    else bad = true;
+                }
+                pos = di;
+                while (pos < len) {
+                    while (pos < len && cmd[pos] == ' ') pos++;
+                    if (pos >= len) break;
+                    const char* tok = cmd + pos;
+                    size_t tok_len = 0;
+                    while (pos + tok_len < len && cmd[pos + tok_len] != ' ') tok_len++;
+                    if (tok_len == 3 && tok[0]=='t'&&tok[1]=='c'&&tok[2]=='p') tcpdump_filter_proto = IP_PROTOCOL_TCP;
+                    else if (tok_len == 3 && tok[0]=='u'&&tok[1]=='d'&&tok[2]=='p') tcpdump_filter_proto = IP_PROTOCOL_UDP;
+                    else if (tok_len == 4 && tok[0]=='i'&&tok[1]=='c'&&tok[2]=='m'&&tok[3]=='p') tcpdump_filter_proto = IP_PROTOCOL_ICMP;
+                    else if (tok_len == 2 && tok[0]=='i'&&tok[1]=='p') { tcpdump_filter_proto = 0; tcpdump_filter_ipv4 = true; }
+                    else if (tok_len == 3 && tok[0]=='a'&&tok[1]=='r'&&tok[2]=='p') tcpdump_filter_etype = ETH_TYPE_ARP;
+                    else if (tok_len == 4 && tok[0]=='p'&&tok[1]=='o'&&tok[2]=='r'&&tok[3]=='t') {
+                        pos += tok_len;
+                        while (pos < len && cmd[pos] == ' ') pos++;
+                        size_t pstart = pos;
+                        uint16_t pval = 0;
+                        while (pos < len && cmd[pos] >= '0' && cmd[pos] <= '9') {
+                            pval = (uint16_t)(pval * 10 + (uint16_t)(cmd[pos] - '0'));
+                            pos++;
+                        }
+                        if (pos == pstart) { bad = true; break; }
+                        tcpdump_filter_port = pval;
+                        continue;
+                    } else if (tok_len == 4 && tok[0]=='h'&&tok[1]=='o'&&tok[2]=='s'&&tok[3]=='t') {
+                        pos += tok_len;
+                        while (pos < len && cmd[pos] == ' ') pos++;
+                        size_t hstart = pos;
+                        size_t hlen = 0;
+                        while (pos + hlen < len && cmd[pos + hlen] != ' ') hlen++;
+                        uint32_t hip = 0;
+                        if (hlen == 0 || ip_parse_address(cmd + hstart, hlen, &hip) != 0) { bad = true; break; }
+                        tcpdump_filter_ip = hip;
+                    } else {
+                        terminal_writestring("\nUnknown filter: ");
+                        for (size_t j = 0; j < tok_len; j++) terminal_putchar(cmd[pos + j]);
+                        bad = true;
+                        break;
+                    }
+                    pos += tok_len;
+                }
+
+                if (bad) {
+                    terminal_writestring("\nUsage: tcpdump [count] [tcp|udp|icmp|arp|ip] [port N] [host IP]");
+                    flush_line(); return;
+                }
+
+                terminal_writestring("\nCapturing up to ");
+                shell_write_u32((uint32_t)count);
+                terminal_writestring((tcpdump_filter_proto || tcpdump_filter_etype) ?
+                                     " packets (filtered). Press Ctrl+C to stop." :
+                                     " packets. Press Ctrl+C to stop.");
+
+                tcpdump_remaining = count;
+                net_capture_set(tcpdump_capture);
+
+                uint32_t t0 = timer_ms();
+                while (tcpdump_remaining > 0) {
+                    nic_process_packets();
+                    char k = poll_key();
+                    if (k == 3) { terminal_writestring("\n^C"); break; }
+                    if (timer_ms() - t0 >= 30000) break;
+                    sched_yield();
+                }
+
+                net_capture_set(0);
+                tcpdump_remaining = 0;
+                tcpdump_filter_proto = 0;
+                tcpdump_filter_etype = 0;
+                tcpdump_filter_ipv4 = false;
+                tcpdump_filter_port = 0;
+                tcpdump_filter_ip = 0;
+                terminal_writestring("\nCapture stopped");
+                flush_line(); return;
+            }
+        }
+
         // autotest vga — console + framebuffer smoke
         if (len >= 12 && cmd[0]=='a'&&cmd[1]=='u'&&cmd[2]=='t'&&cmd[3]=='o'&&
             cmd[4]=='t'&&cmd[5]=='e'&&cmd[6]=='s'&&cmd[7]=='t'&&cmd[8]==' '&&
@@ -2371,7 +3414,7 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
         if (len >= 16 && cmd[0]=='a'&&cmd[1]=='u'&&cmd[2]=='t'&&cmd[3]=='o'&&
             cmd[4]=='t'&&cmd[5]=='e'&&cmd[6]=='s'&&cmd[7]=='t'&&cmd[8]==' '&&
             cmd[9]=='n'&&cmd[10]=='e'&&cmd[11]=='t'&&cmd[12]=='w'&&cmd[13]=='o'&&
-            cmd[14]=='r'&&cmd[15]=='k') {
+            cmd[14]=='r'&&cmd[15]=='k' && (len == 16 || cmd[16] == ' ')) {
             uint16_t port = 8080;
             int max_req = 32;
             size_t pos = 16;
@@ -2555,7 +3598,8 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
 
         // httpserver [port] [max] — HTTP/1.1 сервер (файлы из /www)
         if (len >= 10 && cmd[0]=='h'&&cmd[1]=='t'&&cmd[2]=='t'&&cmd[3]=='p'&&
-            cmd[4]=='s'&&cmd[5]=='e'&&cmd[6]=='r'&&cmd[7]=='v'&&cmd[8]=='e'&&cmd[9]=='r') {
+            cmd[4]=='s'&&cmd[5]=='e'&&cmd[6]=='r'&&cmd[7]=='v'&&cmd[8]=='e'&&cmd[9]=='r' &&
+            (len == 10 || cmd[10] == ' ')) {
             uint16_t port = 80;
             int max_req = 8;
             size_t pos = 10;
@@ -2585,7 +3629,7 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
             while (t > 0 && pi < 7) pb[pi++] = tmp[--t];
             pb[pi] = 0;
             terminal_writestring(pb);
-            terminal_writestring(" — httpd kthread (curl on host)...");
+            terminal_writestring(" - httpd kthread (curl on host)...");
             int hid = http_server_start(port, max_req, 5000);
             if (hid < 0) {
                 terminal_writestring("\nhttpserver start failed");
@@ -2889,8 +3933,8 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
         // socktest tcp|udp <port> — тест Socket API
         if (len >= 13 && cmd[0]=='s'&&cmd[1]=='o'&&cmd[2]=='c'&&cmd[3]=='k'&&cmd[4]=='t'&&
             cmd[5]=='e'&&cmd[6]=='s'&&cmd[7]=='t'&&cmd[8]==' ') {
-            bool is_tcp = (len >= 17 && cmd[9]=='t'&&cmd[10]=='c'&&cmd[11]=='p'&&cmd[12]==' ');
-            bool is_udp = (len >= 17 && cmd[9]=='u'&&cmd[10]=='d'&&cmd[11]=='p'&&cmd[12]==' ');
+            bool is_tcp = (len >= 13 && cmd[9]=='t'&&cmd[10]=='c'&&cmd[11]=='p'&&cmd[12]==' ');
+            bool is_udp = (len >= 13 && cmd[9]=='u'&&cmd[10]=='d'&&cmd[11]=='p'&&cmd[12]==' ');
             if (!is_tcp && !is_udp) {
                 terminal_writestring("\nUsage: socktest tcp <port> | socktest udp <port>");
                 flush_line(); return;
@@ -2990,7 +4034,7 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
                 terminal_writestring("\n=== Routing table ===");
                 int rc = route_count();
                 if (rc == 0) {
-                    terminal_writestring("\n(empty — using connected/default helpers)");
+                    terminal_writestring("\n(empty - using connected/default helpers)");
                 }
                 for (int i = 0; i < rc; i++) {
                     const struct route_entry* re = route_get(i);
@@ -3040,26 +4084,17 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
 
     static const char* shell_commands[] = {
         "help", "ls", "find", "cd", "pwd", "clear", "echo", "version", "date", "setdate", "settime", "runelf", "disk", "ps", "kill",
+        "login", "logout", "whoami", "id", "users", "useradd", "userdel", "usermod", "groupadd", "groups", "passwd", "su", "chgrp",
+        "sessions", "session", "newsession",
         "cat", "nano", "write", "rm", "reboot", "shutdown", "poweroff", "acpi", "resolution", "test",
-        "network", "dhcp", "ip", "udp", "tcp", "udplisten", "ping", "httpget", "httpserver", "dns", "arp", "netstat", "ports", "port", "route", "socktest", "log", "autotest", 0
+        "network", "ifconfig", "dhcp", "ip", "udp", "tcp", "udplisten", "ping", "traceroute", "tcpdump", "httpget", "httpserver", "dns", "arp", "netstat", "ports", "port", "route", "socktest", "log", "autotest", 0
     };
     static const char* network_subcommands[] = { "static", "save", "reload", 0 };
     static const char* log_subcommands[] = { "off", "err", "info", "debug", "test", 0 };
     static const char* find_subcommands[] = { "-name", "-type", 0 };
     static const char* path_commands[] = { "cd", "cat", "rm", "write", "ls", "nano", "find", 0 };
 
-    size_t tab_last_line_len = (size_t)-1;
-    size_t tab_last_word_start = (size_t)-1;
-    int tab_cycle_idx = -1;
-
-    #define SHELL_HISTORY_SIZE 24
-    static char shell_history[SHELL_HISTORY_SIZE][128];
-    static size_t shell_history_len[SHELL_HISTORY_SIZE];
-    static int shell_history_count = 0;
-    static int shell_history_pos = -1;
-    static char shell_history_draft[128];
-    static size_t shell_history_draft_len = 0;
-    static bool shell_history_has_draft = false;
+    #define SHELL_HISTORY_SIZE SESS_HIST
 
     auto history_push = [&](const char* cmdline, size_t len) {
         if (len == 0) return;
@@ -3100,7 +4135,6 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
         if (terminal_in_scrollback()) terminal_leave_scrollback();
         clear_prompt_row();
         terminal_set_cursor(prompt_row, 0);
-        log_mirror_set_input(true);
         prompt_print();
         line_len = 0;
         for (size_t i = 0; i < new_len && i < sizeof(line) - 1; i++) {
@@ -3108,10 +4142,10 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
             terminal_putchar(text[i]);
         }
         line[line_len] = 0;
-        log_mirror_set_input(false);
+        cur_pos = line_len;
         tab_last_line_len = (size_t)-1;
         tab_cycle_idx = -1;
-        terminal_set_cursor(prompt_row, prompt_col + line_len);
+        terminal_set_cursor(prompt_row, prompt_col + cur_pos);
     };
 
     auto history_up = [&]() {
@@ -3147,13 +4181,11 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
         if (terminal_in_scrollback()) terminal_leave_scrollback();
         clear_prompt_row();
         terminal_set_cursor(prompt_row, 0);
-        log_mirror_set_input(true);
         prompt_print();
         for (size_t i = 0; i < line_len; i++) {
             terminal_putchar(line[i]);
         }
-        log_mirror_set_input(false);
-        terminal_set_cursor(prompt_row, prompt_col + line_len);
+        terminal_set_cursor(prompt_row, prompt_col + cur_pos);
     };
 
     auto tab_show_matches = [&](int match_count, const char** matches) {
@@ -3176,7 +4208,7 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
         for (size_t i = 0; i < line_len; i++) {
             terminal_putchar(line[i]);
         }
-        terminal_set_cursor(prompt_row, prompt_col + line_len);
+        terminal_set_cursor(prompt_row, prompt_col + cur_pos);
     };
 
     auto tab_complete = [&]() {
@@ -3442,6 +4474,15 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
         tab_show_matches(match_count, matches);
     };
 
+    // Авторизация при запуске ОС — до входа в shell.
+    do_login_prompt();
+    terminal_writestring("\nWelcome to ");
+    terminal_writestring(KERNEL_NAME);
+    terminal_putchar('\n');
+    prompt_row = terminal_get_row();
+    line_len = 0;
+    prompt_print();
+
     // Главный цикл: softirq net_process + TCP/DHCP на PIT time
     uint32_t last_timer_ms = timer_ms();
     uint32_t last_status_ms = last_timer_ms;
@@ -3460,6 +4501,9 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
             last_status_ms = now_ms;
             if (!terminal_in_scrollback()) refresh_status_line();
         }
+
+        /* Мигание курсора (программный блок). */
+        terminal_cursor_tick(now_ms);
         
         /* Drain several keys per tick so IRQ buffer does not overflow under yield/FB. */
         for (int kdrain = 0; kdrain < 16; kdrain++) {
@@ -3471,8 +4515,17 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
                 history_up();
             } else if (uc == KEY_DOWN) {
                 history_down();
-            } else if (uc == KEY_LEFT || uc == KEY_RIGHT || uc == KEY_HOME || uc == KEY_END ||
-                       uc == KEY_INSERT || (uc >= KEY_F1 && uc <= KEY_F12)) {
+            } else if (uc == KEY_LEFT) {
+                if (cur_pos > 0) { cur_pos--; terminal_set_cursor(prompt_row, prompt_col + cur_pos); }
+            } else if (uc == KEY_RIGHT) {
+                if (cur_pos < line_len) { cur_pos++; terminal_set_cursor(prompt_row, prompt_col + cur_pos); }
+            } else if (uc == KEY_HOME) {
+                cur_pos = 0;
+                terminal_set_cursor(prompt_row, prompt_col);
+            } else if (uc == KEY_END) {
+                cur_pos = line_len;
+                terminal_set_cursor(prompt_row, prompt_col + line_len);
+            } else if (uc == KEY_INSERT || (uc >= KEY_F1 && uc <= KEY_F12)) {
                 /* unused in line editor */
             } else if (uc == KEY_PGUP) {
                 terminal_scroll_page_up();
@@ -3482,22 +4535,76 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
                 refresh_status_line();
             } else if (c == 12 || (keyboard_ctrl_down() && (c == 'l' || c == 'L'))) {
                 line_len = 0;
+                cur_pos = 0;
                 cmd_clear();
-            } else if (c == '\n') {
+            } else if (c == 3) {
+                /* Ctrl+C: отмена ввода — прервать текущую строку */
+                if (line_len > 0) {
+                    terminal_writestring("^C\n");
+                    line_len = 0;
+                    cur_pos = 0;
+                } else {
+                    terminal_writestring("^C\n");
+                }
+                flush_line();
+            } else if (c == 21) {
+                /* Ctrl+U: удалить строку от курсора до начала */
+                if (line_len > 0) {
+                    size_t cols = terminal_get_width();
+                    if (cols == 0) cols = 80;
+                    uint8_t colr = terminal_getcolor();
+                    for (size_t i = 0; i < cols; i++)
+                        terminal_put_at(prompt_row, i, ' ', colr);
+                    terminal_set_cursor(prompt_row, 0);
+                    prompt_print();
+                    line_len = 0;
+                    cur_pos = 0;
+                    line[0] = 0;
+                }
+            } else if (c == 1) {
+                /* Ctrl+A: переместить курсор в начало строки */
+                cur_pos = 0;
+                terminal_set_cursor(prompt_row, prompt_col);
+            } else if (c == 5) {
+                /* Ctrl+E: переместить курсор в конец строки */
+                cur_pos = line_len;
+                terminal_set_cursor(prompt_row, prompt_col + line_len);
+            } else if (c == '\n' || c == '\r') {
                 line[line_len] = 0;
                 if (line_len > 0) history_push(line, line_len);
                 shell_history_pos = -1;
                 shell_history_has_draft = false;
                 process_command(line, line_len);
                 line_len = 0;
-            } else if (c == '\b' || uc == KEY_DELETE) {
-                if (line_len > 0) {
+                cur_pos = 0;
+            } else if (c == '\b') {
+                if (cur_pos > 0) {
                     if (terminal_in_scrollback()) terminal_leave_scrollback();
+                    bool mid = (cur_pos < line_len);
+                    for (size_t i = cur_pos - 1; i + 1 < line_len; i++) line[i] = line[i + 1];
                     line_len--;
-                    line[line_len] = 0;
-                    size_t col = prompt_col + line_len;
-                    terminal_put_at(prompt_row, col, ' ', terminal_getcolor());
-                    terminal_set_cursor(prompt_row, col);
+                    cur_pos--;
+                    if (!mid) {
+                        size_t col = prompt_col + line_len;
+                        terminal_put_at(prompt_row, col, ' ', terminal_getcolor());
+                        terminal_set_cursor(prompt_row, col);
+                        log_mirror_char('\b');
+                        log_mirror_char(' ');
+                        log_mirror_char('\b');
+                    } else {
+                        redraw_input_line();
+                    }
+                    tab_last_line_len = (size_t)-1;
+                    tab_cycle_idx = -1;
+                    shell_history_pos = -1;
+                }
+            } else if (uc == KEY_DELETE) {
+                /* Delete: удаляет символ ПОД курсором (вперёд), курсор не сдвигаем. */
+                if (cur_pos < line_len) {
+                    if (terminal_in_scrollback()) terminal_leave_scrollback();
+                    for (size_t i = cur_pos; i + 1 < line_len; i++) line[i] = line[i + 1];
+                    line_len--;
+                    redraw_input_line();
                     tab_last_line_len = (size_t)-1;
                     tab_cycle_idx = -1;
                     shell_history_pos = -1;
@@ -3507,17 +4614,24 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
                 tab_complete();
             } else if (c == 27) {
                 line_len = 0;
+                cur_pos = 0;
                 redraw_input_line();
                 tab_last_line_len = (size_t)-1;
                 tab_cycle_idx = -1;
             } else if (uc < 0x80 && c >= 32) {
                 if (line_len < sizeof(line) - 1) {
                     if (terminal_in_scrollback()) terminal_leave_scrollback();
-                    line[line_len++] = c;
-                    log_mirror_set_input(true);
-                    terminal_set_cursor(prompt_row, prompt_col + line_len - 1);
-                    terminal_putchar(c);
-                    log_mirror_set_input(false);
+                    bool mid = (cur_pos < line_len);
+                    for (size_t i = line_len; i > cur_pos; i--) line[i] = line[i - 1];
+                    line[cur_pos] = c;
+                    line_len++;
+                    cur_pos++;
+                    if (!mid) {
+                        terminal_set_cursor(prompt_row, prompt_col + line_len - 1);
+                        terminal_putchar(c);
+                    } else {
+                        redraw_input_line();
+                    }
                     tab_last_line_len = (size_t)-1;
                     tab_cycle_idx = -1;
                     shell_history_pos = -1;

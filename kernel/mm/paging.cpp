@@ -181,6 +181,12 @@ void paging_mark_user_pde(uint32_t cr3, uint32_t pde_index) {
     dir[pde_index] |= PDE_USER;
 }
 
+void paging_clear_user_pde(uint32_t cr3, uint32_t pde_index) {
+    uint32_t* dir = paging_dir_ptr(cr3);
+    if (!dir || pde_index >= PAGE_DIR_ENTRIES) return;
+    dir[pde_index] &= ~(uint32_t)PDE_USER;
+}
+
 static void paging_fill_supervisor(uint32_t* dir) {
     for (int i = 0; i < PAGE_DIR_ENTRIES; i++) dir[i] = 0;
     for (int i = 0; i < (IDENTITY_MB / 4); i++) {
@@ -265,6 +271,47 @@ extern "C" void page_fault_handler_main(uint32_t error_code) {
             task_exit();
         }
         log_fmt3(LOG_ERR, "mm", "pf panic", "addr", fault_addr, "err", error_code, "n", g_pf_count);
+        while (1) asm volatile ("hlt");
+    }
+
+    /* 0xffe00000+ — recursive/high-регион; сюда ядро обращаться не должно.
+       Не-present-фолт тут === порча return-адреса/указателя. Диагностика. */
+    if (fault_addr >= 0xffe00000u && !(error_code & 0x1u) && !(error_code & 0x4u)) {
+        static const char pr[] = "\r\n[CRASH_HIGH]\r\n";
+        for (int i = 0; pr[i]; i++) {
+            uint8_t cc = (uint8_t)pr[i];
+            asm volatile ("1: inb $0x3fd, %%al; testb $0x20, %%al; jz 1b" ::: "eax");
+            asm volatile ("outb %0, %1" : : "a"(cc), "Nd"(0x3f8));
+        }
+        uint32_t* fc = &error_code;             /* ferr-36: копия err, ниже pushad-регистров */
+        uint32_t ferr = (uint32_t)(fc + 9);     /* адрес CPU-err = ESP в момент #PF */
+        uint32_t saved_esp = ferr;
+        uint32_t saved_eip = fc[10];            /* EIP фолтящей инструкции */
+        uint32_t saved_cs  = fc[11];
+        uint32_t saved_efl = fc[12];
+        struct task* cur = sched_current();
+        log_fmt3(LOG_ERR, "mm", "CRASH_HIGH",
+                 "addr", fault_addr, "err", error_code, "cr3", cr3);
+        log_fmt3(LOG_ERR, "mm", "ctx",
+                 "eip", saved_eip, "cs", saved_cs, "sesp", saved_esp);
+        log_fmt3(LOG_ERR, "mm", "task",
+                 "id", cur ? (uint32_t)cur->id : 0xFFFFFFFFu,
+                 "user", cur ? (uint32_t)cur->is_user : 2u, "efl", saved_efl);
+        log_fmt3(LOG_ERR, "mm", "regs",
+                 "eax", fc[8], "edx", fc[6], "ebx", fc[5]);
+        for (int i = 0; i < 16; i += 2) {
+            log_fmt3(LOG_ERR, "mm", "fc",
+                     "i", (uint32_t)i, "a", fc[i], "b", fc[i + 1]);
+        }
+        for (int off = 0x10; off < 0xC0; off += 24) {
+            uint32_t w0 = 0xDEADBEEFu, w1 = 0xDEADBEEFu;
+            uint32_t a0 = ferr + off, a1 = ferr + off + 4;
+            uint32_t d0 = a0 >> 22, d1 = a1 >> 22;
+            if (d0 < PAGE_DIR_ENTRIES && (dir[d0] & PDE_PRESENT)) w0 = *(uint32_t*)a0;
+            if (d1 < PAGE_DIR_ENTRIES && (dir[d1] & PDE_PRESENT)) w1 = *(uint32_t*)a1;
+            log_fmt3(LOG_ERR, "mm", "stk",
+                     "a0", a0, "v0", w0, "v1", w1);
+        }
         while (1) asm volatile ("hlt");
     }
 

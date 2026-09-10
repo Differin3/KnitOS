@@ -65,6 +65,10 @@ void network_apply_config(uint32_t ip, uint32_t mask, uint32_t gateway, uint32_t
 // Unified TX: build IP (+frag) + ARP + Ethernet + netif_send
 int ip_output(uint32_t dest_ip, uint8_t protocol, const void* payload, size_t payload_size);
 
+// Same as ip_output but with a custom IP TTL (used by traceroute)
+int ip_output_ttl(uint32_t dest_ip, uint8_t protocol, const void* payload,
+                  size_t payload_size, uint8_t ttl);
+
 void ip_reassembly_init(void);
 void ip_reassembly_gc(void);
 

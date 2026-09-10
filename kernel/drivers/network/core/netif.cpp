@@ -1,5 +1,6 @@
 #include "netif.h"
 #include "skb.h"
+#include "capture.h"
 
 static struct netif netifs[NETIF_MAX];
 static int netif_used = 0;
@@ -83,6 +84,10 @@ int netif_count(void) {
 
 int netif_send(struct netif* nif, const void* data, size_t len) {
     if (!nif || !nif->up || !nif->ops.send || !data || len == 0) return -1;
+    net_capture_fn cap = net_capture_get();
+    if (cap) {
+        cap(nif, 1, data, len);
+    }
     int rc = nif->ops.send(nif, data, len);
     if (rc == 0) {
         nif->stats.tx_packets++;

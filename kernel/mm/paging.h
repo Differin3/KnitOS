@@ -19,6 +19,7 @@ void paging_free_dir(uint32_t cr3);
 /* Пометить один 4MB PDE как user-доступный в указанном каталоге (для сегментов
    конкретного ring3-процесса и его стека). */
 void paging_mark_user_pde(uint32_t cr3, uint32_t pde_index);
+void paging_clear_user_pde(uint32_t cr3, uint32_t pde_index);
 
 /* Test helpers: unmap/remap one 4MB PDE in a given dir (not kernel dir preferred). */
 void paging_unmap_pde(uint32_t cr3, uint32_t pde_index);

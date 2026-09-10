@@ -5,6 +5,7 @@
 #include "drivers/network/socket.h"
 #include "drivers/network/core/net_ports.h"
 #include "fs_file.h"
+#include "vfs.h"
 #include "mm/paging.h"
 #include "elf.h"
 #include <stddef.h>
@@ -202,6 +203,73 @@ int task_spawn_user(const uint8_t* elf_img, size_t elf_len, const char* name) {
     log_fmt3(LOG_INFO, "sched", "spawn_user", "id", (uint32_t)t->id,
              "entry", entry, "stack", t->user_stack);
     return t->id;
+}
+
+static const char* task_path_base(const char* path) {
+    const char* b = path;
+    for (const char* p = path; *p; p++) {
+        if (*p == '/') b = p + 1;
+    }
+    return b;
+}
+
+/* exec для ring3: заменяет образ текущей задачи ELF-файлом из ФС.
+   При успехе возврата НЕТ — задача уходит в ring3 с новой программой. */
+int task_exec_user(const char* path) {
+    if (!g_sched_ready || !g_current || !g_current->is_user || !path || !path[0]) {
+        return -1;
+    }
+    struct task* t = g_current;
+
+    struct fs_stat st;
+    if (vfs_stat(path, &st) != 0) return -2;
+    if (st.size == 0 || st.size > 262144u) return -3;
+    uint8_t* elf = (uint8_t*)malloc(st.size);
+    if (!elf) return -4;
+    if (vfs_read(path, elf, st.size) != (int)st.size) {
+        free(elf);
+        return -5;
+    }
+
+    /* Валидация ДО записи: при ошибке текущий образ не портим. */
+    if (elf32_validate(elf, st.size) != 0) {
+        free(elf);
+        return -6;
+    }
+    uint32_t lo = 0, hi = 0;
+    if (elf32_user_ranges(elf, st.size, &lo, &hi) != 0) {
+        free(elf);
+        return -7;
+    }
+    uint32_t entry = 0;
+    if (elf32_load(elf, st.size, &entry) != 0 || entry == 0) {
+        free(elf);
+        return -8;
+    }
+    free(elf);
+
+    /* Снимаем старый user-доступ во всей области ELF, затем включаем
+       только под новый образ и новый стек. Физические страницы не трогаем. */
+    for (uint32_t va = ELF_USER_VA_MIN; va < ELF_USER_VA_MAX; va += USER_STACK_SLOT_STEP) {
+        paging_clear_user_pde(t->cr3, va >> 22);
+    }
+    for (uint32_t va = lo & ~(USER_STACK_SLOT_STEP - 1u); va < hi; va += USER_STACK_SLOT_STEP) {
+        paging_mark_user_pde(t->cr3, va >> 22);
+    }
+    uint32_t nstack = user_stack_alloc();
+    paging_mark_user_pde(t->cr3, (nstack - USER_STACK_SLOT_STEP) >> 22);
+
+    t->user_entry = entry;
+    t->user_stack = nstack;
+    task_copy_name(t->name, task_path_base(path));
+
+    paging_set_user_esp0(t->kstack_top);
+    paging_load_cr3(t->cr3);
+    log_fmt3(LOG_INFO, "sched", "exec_user", "entry", entry, "stack", nstack, "ok", 1u);
+
+    /* Уходим в ring3 к новой программе. Сюда не возвращаемся. */
+    user_mode_enter(entry, nstack);
+    return 0;
 }
 
 static void task_slot_clear(struct task* t) {
@@ -474,6 +542,24 @@ int task_getuid(void) {
     return 0;
 }
 
+int task_getgid(void) {
+    if (g_current) return (int)g_current->gid;
+    return 0;
+}
+
+int task_setgid(uint16_t gid) {
+    if (!g_current) return -1;
+    if (g_current->uid != 0 && g_current->gid != gid) return -1;
+    g_current->gid = gid;
+    return 0;
+}
+
+int task_setgid_force(uint16_t gid) {
+    if (!g_current) return -1;
+    g_current->gid = gid;
+    return 0;
+}
+
 static struct task* task_find_by_id_n(int id) {
     if (id < 0) return 0;
     for (int i = 0; i < TASK_MAX; i++) {
@@ -487,6 +573,12 @@ int task_setuid(uint16_t uid) {
     if (!g_current) return -1;
     /* Менять чужой uid может только root; свой — всегда. */
     if (g_current->uid != 0 && g_current->uid != uid) return -1;
+    g_current->uid = uid;
+    return 0;
+}
+
+int task_setuid_force(uint16_t uid) {
+    if (!g_current) return -1;
     g_current->uid = uid;
     return 0;
 }
