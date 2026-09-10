@@ -265,7 +265,6 @@ static void build_kexinit(uint8_t* out, uint32_t* outlen) {
     bw_str(&b, "", 0);   bw_str(&b, "", 0);
     bw_u8(&b, 0); bw_u32(&b, 0);
     *outlen = b.len;
-    printf("sshd: kexinit len=%d\n", (int)*outlen);
 }
 
 static void derive_key(uint8_t out[64], const uint8_t* H, char letter) {
@@ -346,7 +345,6 @@ static int do_kex(void) {
     derive_key(g_key_c2s, H, 'C');
     derive_key(g_key_s2c, H, 'D');
     g_encrypted = 1;
-    printf("sshd: KEX done (curve25519-sha256, ssh-ed25519)\n");
     return 0;
 }
 
@@ -448,7 +446,6 @@ static int do_userauth(void) {
             memcpy(pw, pass, pl);
             pw[pl] = 0;
             ok = verify_password(g_user, pw);
-            printf("sshd: password auth user=%s ok=%d\n", g_user, ok);
         }
         if (ok) {
             uint8_t succ[1] = { MSG_USERAUTH_SUCCESS };
@@ -473,7 +470,6 @@ static int do_userauth(void) {
         g_pending_len = plen;
         g_has_pending = 1;
     }
-    printf("sshd: user authenticated\n");
     return 0;
 }
 
@@ -699,12 +695,10 @@ static void serve(int c) {
     if (read_version(c, g_vc, sizeof(g_vc)) < 0) return;
     if (strncmp(g_vc, "SSH-", 4) != 0) return;
     strcpy(g_vs, SSHV);
-    printf("sshd: client %s\n", g_vc);
 
-    if (do_kex() < 0) { printf("sshd: kex failed\n"); return; }
-    if (do_userauth() < 0) { printf("sshd: auth failed\n"); return; }
-    if (do_connection() < 0) { printf("sshd: connection failed\n"); return; }
-    printf("sshd: session closed\n");
+    if (do_kex() < 0) return;
+    if (do_userauth() < 0) return;
+    if (do_connection() < 0) return;
 }
 
 int main(int argc, char** argv) {
@@ -717,14 +711,13 @@ int main(int argc, char** argv) {
     memcpy(g_host_sk + 32, g_host_pk, 32);
 
     int lfd = (int)sys_socket(AF_INET, SOCK_STREAM, 0);
-    if (lfd < 0) { printf("sshd: socket failed\n"); return 1; }
+    if (lfd < 0) return 1;
     struct sockaddr_in addr;
     addr.sin_family = AF_INET;
     addr.sin_port = SSH_PORT;
     addr.sin_addr = 0;
-    if (sys_bind(lfd, &addr) < 0) { printf("sshd: bind failed\n"); return 1; }
-    if (sys_listen(lfd, 4) < 0) { printf("sshd: listen failed\n"); return 1; }
-    printf("sshd: listening on port %d\n", SSH_PORT);
+    if (sys_bind(lfd, &addr) < 0) return 1;
+    if (sys_listen(lfd, 4) < 0) return 1;
     for (;;) {
         int c = (int)sys_accept(lfd, 10000);
         if (c < 0) continue;
