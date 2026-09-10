@@ -25,14 +25,15 @@ bool fb_active(void);
 uint8_t fb_scale(void);
 uint32_t fb_cell_width(void);
 uint32_t fb_cell_height(void);
+void fb_put_pixel(uint32_t x, uint32_t y, uint32_t rgb);
+/* Рисует тонкую курсорную полоску по низу ячейки (для мигающего курсора). */
+void fb_draw_cursor_line(size_t cell_x, size_t cell_y);
 /* Place the text grid inside the FB (centers + keeps bottom status on-screen). */
 void fb_set_console_origin(uint32_t origin_x, uint32_t origin_y);
 
 void fb_clear(uint32_t rgb);
 void fb_draw_glyph(size_t cell_x, size_t cell_y, char c, uint8_t vga_color);
 void fb_fill_cell(size_t cell_x, size_t cell_y, uint8_t vga_color);
-/* Плотная заливка ячейки цветом fg (для курсора). */
-void fb_fill_block(size_t cell_x, size_t cell_y, uint8_t vga_color);
 /* Scroll a rectangular cell band up by `lines` cell-rows using memmove (fast). */
 void fb_scroll_cells_up(size_t cell_row0, size_t cell_rows, size_t cell_cols,
                         size_t lines, uint8_t fill_vga);

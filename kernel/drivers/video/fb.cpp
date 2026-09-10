@@ -136,7 +136,20 @@ static uint32_t vga_to_rgb(uint8_t vga_color) {
     return pal[vga_color & 0x0F];
 }
 
-static void fb_put_pixel(uint32_t x, uint32_t y, uint32_t rgb) {
+void fb_draw_cursor_line(size_t cell_x, size_t cell_y) {
+    if (!g_fb.active) return;
+    uint8_t s = g_fb.scale ? g_fb.scale : 1;
+    uint32_t cw = (uint32_t)FB_FONT_W * s;
+    uint32_t ch = (uint32_t)FB_FONT_H * s;
+    uint32_t px = g_fb.origin_x + (uint32_t)cell_x * cw;
+    uint32_t py = g_fb.origin_y + (uint32_t)cell_y * ch + ch - 2u * s;
+    if (px + cw > g_fb.width || py + 2u * s > g_fb.height) return;
+    for (uint32_t y = py; y < py + 2u * s; y++)
+        for (uint32_t x = px; x < px + cw; x++)
+            fb_put_pixel(x, y, 0xFFFFFF);
+}
+
+void fb_put_pixel(uint32_t x, uint32_t y, uint32_t rgb) {
     if (!g_fb.active || x >= g_fb.width || y >= g_fb.height) return;
     uint8_t* p = (uint8_t*)g_fb.addr + y * g_fb.pitch + x * (g_fb.bpp / 8);
     if (g_fb.bpp == 32 || g_fb.bpp == 24) {
@@ -244,21 +257,6 @@ void fb_clear(uint32_t rgb) {
 
 void fb_fill_cell(size_t cell_x, size_t cell_y, uint8_t vga_color) {
     fb_draw_glyph(cell_x, cell_y, ' ', vga_color);
-}
-
-/* Плотная заливка всей ячейки цветом fg — используется для мигающего курсора. */
-void fb_fill_block(size_t cell_x, size_t cell_y, uint8_t vga_color) {
-    if (!g_fb.active) return;
-    uint8_t s = g_fb.scale ? g_fb.scale : 1;
-    uint32_t cw = (uint32_t)FB_FONT_W * s;
-    uint32_t ch = (uint32_t)FB_FONT_H * s;
-    uint32_t px = g_fb.origin_x + (uint32_t)cell_x * cw;
-    uint32_t py = g_fb.origin_y + (uint32_t)cell_y * ch;
-    if (px + cw > g_fb.width || py + ch > g_fb.height) return;
-    uint32_t fg = vga_to_rgb(vga_color & 0x0F);
-    for (uint32_t y = py; y < py + ch; y++)
-        for (uint32_t x = px; x < px + cw; x++)
-            fb_put_pixel(x, y, fg);
 }
 
 void fb_scroll_cells_up(size_t cell_row0, size_t cell_rows, size_t cell_cols,
