@@ -57,6 +57,24 @@
 
 #define SYS_PTY_OPEN    47
 #define SYS_ISATTY      48
+#define SYS_CRYPTO      49
+
+/* Крипто-операции (SYS_CRYPTO). */
+struct kcrypto_req {
+    uint32_t op;
+    uint32_t in1; uint32_t in1_len;
+    uint32_t in2; uint32_t in2_len;
+    uint32_t in3; uint32_t in3_len;
+    uint32_t in4; uint32_t in4_len;
+    uint32_t out; uint32_t out_cap;
+    int      result;
+};
+#define KC_SHA256       1
+#define KC_HMAC_SHA256  2
+#define KC_AEAD_ENC     3
+#define KC_AEAD_DEC     4
+#define KC_X25519       5
+#define KC_RANDOM       6
 
 struct syscall_args {
     uint32_t arg0;

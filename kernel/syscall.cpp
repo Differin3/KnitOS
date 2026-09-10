@@ -12,6 +12,11 @@
 #include "mm/paging.h"
 #include "pipe.h"
 #include "pty.h"
+#include "crypto/sha256.h"
+#include "crypto/chacha20poly1305.h"
+#include "crypto/x25519.h"
+#include "crypto/rng.h"
+#include <string.h>
 #include <stddef.h>
 
 extern "C" void syscall_handler_asm();
@@ -406,6 +411,8 @@ extern "C" int syscall_handler(struct syscall_args* args, uint32_t caller_cs) {
             return task_setgid((uint16_t)args->arg1);
         case SYS_GETPID:
             return sched_current_id();
+        case SYS_KILL:
+            return task_kill((int)args->arg1);
         case SYS_GETPPID: {
             struct task* cur = sched_current();
             return cur ? cur->parent_pid : -1;
@@ -452,6 +459,74 @@ extern "C" int syscall_handler(struct syscall_args* args, uint32_t caller_cs) {
             }
             if (fd >= 0 && fd <= 2) return 1; /* неявная консоль */
             return 0;
+        }
+        case SYS_CRYPTO: {
+            struct kcrypto_req req;
+            if (user_copy_in(&req, (const void*)args->arg1, sizeof(req), caller_cs, usermax) != 0)
+                return -1;
+            static uint8_t in1[2048];
+            static uint8_t in2[2048];
+            static uint8_t in3[256];
+            static uint8_t in4[1024 + 16];
+            static uint8_t outb[1024 + 16];
+            switch (req.op) {
+            case KC_SHA256: {
+                if (req.in1_len > sizeof(in1)) return -1;
+                if (req.in1_len && user_copy_in(in1, (const void*)req.in1, req.in1_len, caller_cs, usermax) != 0) return -1;
+                if (req.out_cap < 32) return -1;
+                sha256(in1, req.in1_len, outb);
+                if (user_copy_out((void*)req.out, outb, 32, caller_cs, usermax) != 0) return -1;
+                return 32;
+            }
+            case KC_HMAC_SHA256: {
+                if (req.in1_len > sizeof(in1) || req.in2_len > sizeof(in2)) return -1;
+                if (req.in1_len && user_copy_in(in1, (const void*)req.in1, req.in1_len, caller_cs, usermax) != 0) return -1;
+                if (req.in2_len && user_copy_in(in2, (const void*)req.in2, req.in2_len, caller_cs, usermax) != 0) return -1;
+                if (req.out_cap < 32) return -1;
+                hmac_sha256(in1, req.in1_len, in2, req.in2_len, outb);
+                if (user_copy_out((void*)req.out, outb, 32, caller_cs, usermax) != 0) return -1;
+                return 32;
+            }
+            case KC_X25519: {
+                if (req.in1_len != 32 || req.in2_len != 32 || req.out_cap < 32) return -1;
+                if (user_copy_in(in1, (const void*)req.in1, 32, caller_cs, usermax) != 0) return -1;
+                if (user_copy_in(in2, (const void*)req.in2, 32, caller_cs, usermax) != 0) return -1;
+                x25519(outb, in1, in2);
+                if (user_copy_out((void*)req.out, outb, 32, caller_cs, usermax) != 0) return -1;
+                return 32;
+            }
+            case KC_RANDOM: {
+                uint32_t n = req.out_cap < sizeof(outb) ? req.out_cap : (uint32_t)sizeof(outb);
+                rng_bytes(outb, n);
+                if (n && user_copy_out((void*)req.out, outb, n, caller_cs, usermax) != 0) return -1;
+                return (int)n;
+            }
+            case KC_AEAD_ENC:
+            case KC_AEAD_DEC: {
+                if (req.in1_len != 32 || req.in2_len != 12) return -1;
+                if (user_copy_in(in1, (const void*)req.in1, 32, caller_cs, usermax) != 0) return -1;
+                if (user_copy_in(in2, (const void*)req.in2, 12, caller_cs, usermax) != 0) return -1;
+                if (req.in3_len > sizeof(in3)) return -1;
+                if (req.in3_len && user_copy_in(in3, (const void*)req.in3, req.in3_len, caller_cs, usermax) != 0) return -1;
+                if (req.in4_len > sizeof(in4)) return -1;
+                if (req.in4_len && user_copy_in(in4, (const void*)req.in4, req.in4_len, caller_cs, usermax) != 0) return -1;
+                if (req.op == KC_AEAD_ENC) {
+                    if (req.out_cap < req.in4_len + 16) return -1;
+                    chacha20poly1305_encrypt(outb, in4, req.in4_len, in3, req.in3_len, in2, in1);
+                    if (user_copy_out((void*)req.out, outb, req.in4_len + 16, caller_cs, usermax) != 0) return -1;
+                    return (int)(req.in4_len + 16);
+                } else {
+                    if (req.in4_len < 16) return -1;
+                    size_t plen = req.in4_len - 16;
+                    if (!chacha20poly1305_decrypt(outb, in4, plen, in3, req.in3_len, in2, in1))
+                        return -2;
+                    if (plen && user_copy_out((void*)req.out, outb, plen, caller_cs, usermax) != 0) return -1;
+                    return (int)plen;
+                }
+            }
+            default:
+                return -1;
+            }
         }
         case SYS_GETCWD: {
             const char* cwd = task_getcwd();

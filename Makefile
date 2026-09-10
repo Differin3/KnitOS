@@ -91,7 +91,7 @@ KERNEL_OBJ = boot/boot.o boot/interrupts.o boot/user_demo.o kernel/sched/switch.
 	kernel/drivers/network/core/net_wait.o kernel/drivers/network/core/net_ports.o \
 	kernel/drivers/network/http_protocol.o kernel/drivers/network/http_gzip.o kernel/drivers/network/http_server.o \
 	kernel/drivers/network/remote_shell.o kernel/drivers/network/ftp_server.o \
-	kernel/crypto/sha256.o kernel/crypto/chacha20poly1305.o kernel/crypto/x25519.o kernel/crypto/crypto_selftest.o \
+	kernel/crypto/sha256.o kernel/crypto/chacha20poly1305.o kernel/crypto/x25519.o kernel/crypto/rng.o kernel/crypto/crypto_selftest.o \
 	kernel/drivers/network/drivers/rtl8139/rtl8139.o kernel/drivers/network/drivers/pcnet/pcnet.o \
 	kernel/drivers/network/drivers/virtio_net/virtio_net.o \
 	kernel/drivers/network/protocols/ethernet.o kernel/drivers/network/protocols/arp.o \
@@ -140,7 +140,7 @@ user/demo3.elf: $(USER_DEMO3_SRC) user/syscall.h user/link.ld
 # ---- user-space library (libk) + crt0 + M1 test app ----
 USER_CFLAGS = -m32 -ffreestanding -fno-pic -fno-pie -fno-stack-protector -fno-builtin -fno-asynchronous-unwind-tables \
 	-mno-red-zone -mno-mmx -mno-sse -mno-sse2 -nostdlib -Iuser
-USER_LIB_OBJ = user/lib/string.o user/lib/stdlib.o user/lib/stdio.o
+USER_LIB_OBJ = user/lib/string.o user/lib/stdlib.o user/lib/stdio.o user/lib/crypto.o
 
 user/crt0.o: user/crt0.asm
 	$(ASM) $(ASMFLAGS) -o user/crt0.o user/crt0.asm
@@ -153,6 +153,9 @@ user/lib/stdlib.o: user/lib/stdlib.c user/lib/libk.h
 
 user/lib/stdio.o: user/lib/stdio.c user/lib/libk.h
 	$(CC) $(USER_CFLAGS) -c -o user/lib/stdio.o user/lib/stdio.c
+
+user/lib/crypto.o: user/lib/crypto.c user/lib/libk.h user/syscall.h
+	$(CC) $(USER_CFLAGS) -c -o user/lib/crypto.o user/lib/crypto.c
 
 user/argtest.elf: user/argtest.c user/crt0.o $(USER_LIB_OBJ) user/link.ld user/syscall.h
 	$(CC) $(USER_CFLAGS) -c -o user/argtest.o user/argtest.c
@@ -174,12 +177,17 @@ user/sh.elf: user/sh.c user/crt0.o $(USER_LIB_OBJ) user/link.ld user/syscall.h
 	$(LD) -m elf_i386 -nostdlib -static -T user/link.ld -z noseparate-code -z max-page-size=0x1000 \
 		-o user/sh.elf user/crt0.o user/sh.o $(USER_LIB_OBJ)
 
+user/ksshd.elf: user/ksshd.c user/crt0.o $(USER_LIB_OBJ) user/link.ld user/syscall.h
+	$(CC) $(USER_CFLAGS) -c -o user/ksshd.o user/ksshd.c
+	$(LD) -m elf_i386 -nostdlib -static -T user/link.ld -z noseparate-code -z max-page-size=0x1000 \
+		-o user/ksshd.elf user/crt0.o user/ksshd.o $(USER_LIB_OBJ)
+
 user/launcher.elf: $(USER_LAUNCHER_SRC) user/syscall.h user/link.ld
 	$(CC) -m32 -ffreestanding -fno-pic -fno-pie -fno-stack-protector -fno-builtin -fno-asynchronous-unwind-tables \
 		-mno-red-zone -mno-mmx -mno-sse -mno-sse2 -nostdlib -Iuser -c -o user/launcher.o $(USER_LAUNCHER_SRC)
 	$(LD) -m elf_i386 -nostdlib -static -T user/link.ld -z noseparate-code -z max-page-size=0x1000 -o user/launcher.elf user/launcher.o
 
-boot/user_demo.o: $(USER_DEMO_SRC) user/hello.elf user/demo2.elf user/demo3.elf user/launcher.elf user/argtest.elf user/ptytest.elf user/httpd.elf user/sh.elf
+boot/user_demo.o: $(USER_DEMO_SRC) user/hello.elf user/demo2.elf user/demo3.elf user/launcher.elf user/argtest.elf user/ptytest.elf user/httpd.elf user/sh.elf user/ksshd.elf
 	$(ASM) $(ASMFLAGS) -i . -o boot/user_demo.o $(USER_DEMO_SRC)
 
 kernel/elf.o: $(ELF_SRC) kernel/elf.h kernel/serial_log.h
@@ -391,6 +399,9 @@ kernel/crypto/chacha20poly1305.o: kernel/crypto/chacha20poly1305.cpp kernel/cryp
 
 kernel/crypto/x25519.o: kernel/crypto/x25519.cpp kernel/crypto/x25519.h
 	$(CC) $(CFLAGS) -c -o kernel/crypto/x25519.o kernel/crypto/x25519.cpp
+
+kernel/crypto/rng.o: kernel/crypto/rng.cpp kernel/crypto/rng.h kernel/crypto/sha256.h kernel/crypto/chacha20poly1305.h
+	$(CC) $(CFLAGS) -c -o kernel/crypto/rng.o kernel/crypto/rng.cpp
 
 kernel/drivers/network/http_protocol.o: $(HTTP_PROTOCOL_SRC) kernel/drivers/network/http_protocol.h
 	$(CC) $(CFLAGS) -c -o kernel/drivers/network/http_protocol.o $(HTTP_PROTOCOL_SRC)
