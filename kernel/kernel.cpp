@@ -2331,6 +2331,7 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
             extern char user_demo2_start[], user_demo2_end[];
             extern char user_demo3_start[], user_demo3_end[];
             extern char user_launcher_start[], user_launcher_end[];
+            extern char user_argtest_start[], user_argtest_end[];
             const char* arg = cmd + 7;
             const char* which = 0;
             char* start = 0;
@@ -2349,9 +2350,12 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
             } else if (alen >= 8 && arg[0]=='l'&&arg[1]=='a'&&arg[2]=='u'&&arg[3]=='n'&&arg[4]=='c'&&arg[5]=='h'&&arg[6]=='e'&&arg[7]=='r') {
                 which = "launcher";
                 start = user_launcher_start; end = user_launcher_end; name = "launcher";
+            } else if (alen >= 7 && arg[0]=='a'&&arg[1]=='r'&&arg[2]=='g'&&arg[3]=='t'&&arg[4]=='e'&&arg[5]=='s'&&arg[6]=='t') {
+                which = "argtest";
+                start = user_argtest_start; end = user_argtest_end; name = "argtest";
             }
             if (!which) {
-                terminal_writestring("\nUsage: runelf hello|demo2|demo3|launcher");
+                terminal_writestring("\nUsage: runelf hello|demo2|demo3|launcher|argtest");
                 flush_line(); return;
             }
             size_t sz = (size_t)(end - start);

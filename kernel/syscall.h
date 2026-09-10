@@ -44,6 +44,17 @@
 #define SYS_SLEEP       35
 #define SYS_EXEC        36
 
+#define SYS_FORK        37
+#define SYS_WAIT        38
+#define SYS_PIPE        39
+#define SYS_DUP2        40
+#define SYS_GETPID      41
+#define SYS_KILL        42
+#define SYS_EXECVE      43
+#define SYS_GETGID      44
+#define SYS_SETGID      45
+#define SYS_GETPPID     46
+
 struct syscall_args {
     uint32_t arg0;
     uint32_t arg1;
