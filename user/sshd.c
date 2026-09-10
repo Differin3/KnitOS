@@ -357,6 +357,61 @@ static int service_accept(const char* name) {
     return ssh_send(p, b.len);
 }
 
+/* FNV-1a(salt||password), as used by the kernel's /etc/shadow. */
+static uint32_t fnv1a_pw(const char* salt, const char* pass) {
+    uint32_t h = 2166136261u;
+    for (int i = 0; salt[i]; i++) { h ^= (uint8_t)salt[i]; h *= 16777619u; }
+    for (int i = 0; pass[i]; i++) { h ^= (uint8_t)pass[i]; h *= 16777619u; }
+    return h;
+}
+
+/* Verify a password against the "name|salt|hash" line in /etc/shadow. */
+static int verify_password(const char* user, const char* pass) {
+    int fd = (int)sys_open("/etc/shadow", O_RDONLY, 0);
+    if (fd < 0) return 0;
+    static char buf[4096];
+    long n = sys_read(fd, buf, sizeof(buf) - 1);
+    sys_close(fd);
+    if (n <= 0) return 0;
+    buf[n] = 0;
+    size_t ulen = strlen(user);
+    char* p = buf;
+    while (*p) {
+        char* eol = p;
+        while (*eol && *eol != '\n') eol++;
+        char* b1 = p;
+        while (b1 < eol && *b1 != '|') b1++;
+        if (b1 < eol && (size_t)(b1 - p) == ulen && memcmp(p, user, ulen) == 0) {
+            char* b2 = b1 + 1;
+            while (b2 < eol && *b2 != '|') b2++;
+            if (b2 < eol) {
+                char salt[40]; size_t sl = (size_t)(b2 - (b1 + 1));
+                if (sl > sizeof(salt) - 1) sl = sizeof(salt) - 1;
+                memcpy(salt, b1 + 1, sl); salt[sl] = 0;
+                char want[16]; size_t hl = (size_t)(eol - (b2 + 1));
+                if (hl > sizeof(want) - 1) hl = sizeof(want) - 1;
+                memcpy(want, b2 + 1, hl); want[hl] = 0;
+                uint32_t h = fnv1a_pw(salt, pass);
+                static const char hx[] = "0123456789abcdef";
+                char got[16];
+                for (int i = 7; i >= 0; i--) { got[i] = hx[h & 0xF]; h >>= 4; }
+                got[8] = 0;
+                return strcmp(got, want) == 0;
+            }
+        }
+        p = (*eol) ? eol + 1 : eol;
+    }
+    return 0;
+}
+
+static int auth_failure(void) {
+    uint8_t f[64]; struct buf b; b.p = f; b.len = 0; b.cap = sizeof(f);
+    bw_u8(&b, MSG_USERAUTH_FAILURE);
+    bw_str(&b, "password,publickey", 18);
+    bw_u8(&b, 0);
+    return ssh_send(f, b.len);
+}
+
 static int do_userauth(void) {
     static uint8_t pkt[2048];
     uint32_t plen;
@@ -368,10 +423,10 @@ static int do_userauth(void) {
     if (n != 12 || memcmp(svc, "ssh-userauth", 12) != 0) return -1;
     if (service_accept("ssh-userauth") < 0) return -1;
 
-    /* USERAUTH_REQUEST: accept any method (none/password/publickey) */
-    rr = ssh_recv(pkt, &plen);
-    if (rr < 0 || pkt[0] != MSG_USERAUTH_REQUEST) return -1;
-    {
+    /* USERAUTH_REQUEST loop: accept "password" against /etc/shadow. */
+    for (;;) {
+        rr = ssh_recv(pkt, &plen);
+        if (rr < 0 || pkt[0] != MSG_USERAUTH_REQUEST) return -1;
         struct br ur; ur.p = pkt; ur.len = plen; ur.pos = 1;
         uint32_t un = br_u32(&ur);
         const uint8_t* user = br_raw(&ur, un);
@@ -379,9 +434,28 @@ static int do_userauth(void) {
         memcpy(g_user, user, ul);
         g_user[ul] = 0;
         g_shell_uid = (ul == 4 && memcmp(g_user, "root", 4) == 0) ? 0 : 1000;
+        uint32_t sn = br_u32(&ur); br_raw(&ur, sn); /* service */
+        uint32_t mn = br_u32(&ur);
+        const uint8_t* method = br_raw(&ur, mn);
+        int ok = 0;
+        if (mn == 8 && memcmp(method, "password", 8) == 0) {
+            br_u8(&ur); /* FALSE: not a password change */
+            uint32_t pn = br_u32(&ur);
+            const uint8_t* pass = br_raw(&ur, pn);
+            char pw[128];
+            uint32_t pl = pn < sizeof(pw) - 1 ? pn : (uint32_t)sizeof(pw) - 1;
+            memcpy(pw, pass, pl);
+            pw[pl] = 0;
+            ok = verify_password(g_user, pw);
+            printf("sshd: password auth user=%s ok=%d\n", g_user, ok);
+        }
+        if (ok) {
+            uint8_t succ[1] = { MSG_USERAUTH_SUCCESS };
+            if (ssh_send(succ, 1) < 0) return -1;
+            break;
+        }
+        if (auth_failure() < 0) return -1;
     }
-    uint8_t ok[1] = { MSG_USERAUTH_SUCCESS };
-    if (ssh_send(ok, 1) < 0) return -1;
 
     /* Optional SERVICE_REQUEST "ssh-connection"; otherwise the client
        proceeds straight to CHANNEL_OPEN, which we hand to do_connection. */
