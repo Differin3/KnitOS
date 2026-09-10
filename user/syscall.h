@@ -149,8 +149,11 @@ static inline long sys_fsync(long fd) { return syscall2(SYS_FSYNC, (uint32_t)fd)
 static inline void sys_exit(int code) { syscall2(SYS_EXIT, (uint32_t)code); }
 static inline long sys_yield(void) { return syscall1(SYS_YIELD); }
 static inline long sys_fork(void) { return syscall1(SYS_FORK); }
+static inline long sys_waitpid(int pid, int* status) {
+    return syscall3(SYS_WAIT, (uint32_t)pid, (uint32_t)(unsigned long)status);
+}
 static inline long sys_wait(int* status) {
-    return syscall2(SYS_WAIT, (uint32_t)(unsigned long)status);
+    return sys_waitpid(-1, status);
 }
 static inline long sys_pipe(int fds[2]) {
     return syscall2(SYS_PIPE, (uint32_t)(unsigned long)fds);

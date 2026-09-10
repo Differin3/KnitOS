@@ -14,6 +14,9 @@ void paging_map_physical(uint32_t phys, uint32_t bytes);
 /* Private identity-mapped page directories (PSE 4MB). Returns phys addr of PDE or 0. */
 uint32_t paging_create_identity_dir(void);
 uint32_t paging_clone_dir(uint32_t src_cr3);
+/* Глубокий клон: user-PDE копируются в новые физические 4MB-кадры
+   (неидентичное отображение), чтобы процессы не делили память. */
+uint32_t paging_clone_dir_deep(uint32_t src_cr3);
 void paging_free_dir(uint32_t cr3);
 
 /* Пометить один 4MB PDE как user-доступный в указанном каталоге (для сегментов

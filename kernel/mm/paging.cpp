@@ -222,8 +222,71 @@ uint32_t paging_clone_dir(uint32_t src_cr3) {
     return dst_cr3;
 }
 
+/* Пул физических 4MB-кадров для deep-copy fork: [80MB, 128MB). */
+#define FORK_FRAME_BASE   0x05000000u
+#define FORK_FRAME_END    0x08000000u
+#define FORK_FRAME_SIZE   0x00400000u
+#define FORK_FRAME_COUNT  ((FORK_FRAME_END - FORK_FRAME_BASE) / FORK_FRAME_SIZE)
+static uint8_t g_fork_frames[FORK_FRAME_COUNT];
+static uint32_t g_fork_frame_next = 0;
+
+static uint32_t fork_frame_alloc(void) {
+    for (uint32_t i = 0; i < FORK_FRAME_COUNT; i++) {
+        uint32_t idx = (g_fork_frame_next + i) % FORK_FRAME_COUNT;
+        if (!g_fork_frames[idx]) {
+            g_fork_frames[idx] = 1;
+            g_fork_frame_next = (idx + 1) % FORK_FRAME_COUNT;
+            return FORK_FRAME_BASE + idx * FORK_FRAME_SIZE;
+        }
+    }
+    return 0;
+}
+
+static int fork_frame_is_pool(uint32_t phys) {
+    return phys >= FORK_FRAME_BASE && phys < FORK_FRAME_END;
+}
+
+static void fork_frame_free(uint32_t phys) {
+    if (!fork_frame_is_pool(phys)) return;
+    g_fork_frames[(phys - FORK_FRAME_BASE) / FORK_FRAME_SIZE] = 0;
+}
+
+uint32_t paging_clone_dir_deep(uint32_t src_cr3) {
+    uint32_t* src = paging_dir_ptr(src_cr3);
+    if (!src) return 0;
+    uint32_t dst_cr3 = paging_create_identity_dir();
+    if (!dst_cr3) return 0;
+    uint32_t* dst = paging_dir_ptr(dst_cr3);
+    for (int i = 0; i < PAGE_DIR_ENTRIES; i++) {
+        uint32_t e = src[i];
+        if (!(e & PDE_PRESENT) || !(e & PDE_USER) || !(e & PDE_PSE)) {
+            dst[i] = e;
+            continue;
+        }
+        uint32_t phys = fork_frame_alloc();
+        if (!phys) {
+            paging_free_dir(dst_cr3);
+            return 0;
+        }
+        const uint8_t* s = (const uint8_t*)(e & 0xFFC00000u);
+        uint8_t* d = (uint8_t*)phys;
+        for (uint32_t k = 0; k < FORK_FRAME_SIZE; k++) d[k] = s[k];
+        dst[i] = phys | (e & 0xFFFu);
+    }
+    return dst_cr3;
+}
+
 void paging_free_dir(uint32_t cr3) {
     if (!cr3 || cr3 == g_kernel_cr3) return;
+    uint32_t* dir = paging_dir_ptr(cr3);
+    if (dir) {
+        for (int i = 0; i < PAGE_DIR_ENTRIES; i++) {
+            uint32_t e = dir[i];
+            if ((e & PDE_PRESENT) && (e & PDE_USER) && (e & PDE_PSE)) {
+                fork_frame_free(e & 0xFFC00000u);
+            }
+        }
+    }
     for (int i = 0; i < PAGING_ASDIR_MAX; i++) {
         if ((uint32_t)&g_asdirs[i][0] == cr3) {
             g_asdir_used[i] = 0;

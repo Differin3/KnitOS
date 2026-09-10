@@ -127,6 +127,8 @@ int task_spawn_user(const uint8_t* elf_img, size_t elf_len, const char* name);
  */
 int task_exec_user(const char* path);
 int task_exec_user_argv(const char* path, int argc, const char* const* argv);
+int task_fork_user(void);
+int task_wait_child(int pid, int* status_out);
 
 /* Per-task uid. 0 = root, обычный user = 1000. */
 int task_getuid(void);

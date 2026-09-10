@@ -447,6 +447,17 @@ extern "C" int syscall_handler(struct syscall_args* args, uint32_t caller_cs) {
             }
             return task_exec_user_argv(path, argc, kargv);
         }
+        case SYS_FORK:
+            return task_fork_user();
+        case SYS_WAIT: {
+            int status = 0;
+            int r = task_wait_child((int)args->arg1, &status);
+            if (r < 0) return r;
+            if (args->arg2 &&
+                user_copy_out((void*)args->arg2, &status, sizeof(status), caller_cs, usermax) != 0)
+                return -1;
+            return r;
+        }
         case SYS_EXIT:
             task_exit();
             return 0;
