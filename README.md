@@ -9,6 +9,8 @@
 [![Platform](https://img.shields.io/badge/platform-i686%20(x86)-lightgrey.svg)](#requirements)
 [![Version](https://img.shields.io/badge/version-0.2.5-informational.svg)](#)
 
+**English · [Русский](README.ru.md)**
+
 </div>
 
 ---
