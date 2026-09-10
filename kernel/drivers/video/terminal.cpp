@@ -138,20 +138,15 @@ static void term_draw_cursor_at(size_t row, size_t col) {
     if (use_fb) {
         fb_draw_cursor_line(col, row);
     } else {
-        /* VGA text mode — инверсия цветов символа (symbol stays visible). */
-        uint16_t e = cells[row][col];
-        uint8_t attr = (uint8_t)(e >> 8);
-        uint8_t fg = attr & 0x07;
-        uint8_t bg = (attr >> 4) & 0x07;
-        uint8_t inv = (uint8_t)((fg << 4) | (bg & 0x07) | (attr & 0x80));
-        backend_draw_cell(row, col, (uint16_t)(e & 0xFF) | ((uint16_t)inv << 8));
+        /* VGA text mode: используем только аппаратный курсор (underline),
+           чтобы не было артефактов от двойного курсора. */
     }
 }
 
 static void term_restore_cursor_cell(void) {
     if (!g_cursor_painted) return;
     if (g_cursor_prow >= term_rows || g_cursor_pcol >= term_cols) return;
-    backend_draw_cell(g_cursor_prow, g_cursor_pcol, cells[g_cursor_prow][g_cursor_pcol]);
+    /* В VGA курсор аппаратный — восстанавливать ячейку не нужно. */
 }
 
 static void terminal_update_cursor() {
