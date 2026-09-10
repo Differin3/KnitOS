@@ -28,6 +28,9 @@ global user_sh_size
 global user_ksshd_start
 global user_ksshd_end
 global user_ksshd_size
+global user_sshd_start
+global user_sshd_end
+global user_sshd_size
 
 user_demo_start:
     incbin "user/hello.elf"
@@ -82,3 +85,9 @@ user_ksshd_start:
 user_ksshd_end:
 user_ksshd_size:
     dd user_ksshd_end - user_ksshd_start
+
+user_sshd_start:
+    incbin "user/sshd.elf"
+user_sshd_end:
+user_sshd_size:
+    dd user_sshd_end - user_sshd_start
