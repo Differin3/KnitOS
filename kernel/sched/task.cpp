@@ -9,6 +9,7 @@
 #include "mm/paging.h"
 #include "elf.h"
 #include "pty.h"
+#include "pipe.h"
 #include <stddef.h>
 
 extern "C" void sched_switch(uint32_t** old_esp, uint32_t* new_esp);
@@ -448,7 +449,15 @@ int task_fork_user(void) {
     t->gid = parent->gid;
     task_copy_name(t->name, parent->name);
     task_copy_str(t->cwd, TASK_CWD_MAX, parent->cwd);
-    for (int i = 0; i < TASK_FD_MAX; i++) t->fds[i] = parent->fds[i];
+    for (int i = 0; i < TASK_FD_MAX; i++) {
+        t->fds[i] = parent->fds[i];
+        uint8_t fty = parent->fds[i].type;
+        int fh = parent->fds[i].handle;
+        if (fty == TASK_FD_PIPE_R) pipe_ref(fh, 0);
+        else if (fty == TASK_FD_PIPE_W) pipe_ref(fh, 1);
+        else if (fty == TASK_FD_PTY_M) pty_ref(fh, 1);
+        else if (fty == TASK_FD_PTY_S) pty_ref(fh, 0);
+    }
     task_setup_stack(t);
 
     log_fmt3(LOG_INFO, "sched", "fork_user", "id", (uint32_t)t->id,
@@ -748,6 +757,10 @@ int task_fd_close(int fd) {
         socket_close(e->handle);
     } else if (e->type == TASK_FD_FILE && e->handle >= 0) {
         fs_ofile_release(e->handle);
+    } else if (e->type == TASK_FD_PIPE_R) {
+        pipe_close(e->handle, 0);
+    } else if (e->type == TASK_FD_PIPE_W) {
+        pipe_close(e->handle, 1);
     } else if (e->type == TASK_FD_PTY_M) {
         pty_unref(e->handle, 1);
     } else if (e->type == TASK_FD_PTY_S) {
@@ -767,6 +780,10 @@ void task_fd_close_all(struct task* t) {
         } else if (t->fds[i].type == TASK_FD_FILE && t->fds[i].handle >= 0) {
             fs_ofile_release(t->fds[i].handle);
             t->fds[i].handle = -1;
+        } else if (t->fds[i].type == TASK_FD_PIPE_R) {
+            pipe_close(t->fds[i].handle, 0);
+        } else if (t->fds[i].type == TASK_FD_PIPE_W) {
+            pipe_close(t->fds[i].handle, 1);
         } else if (t->fds[i].type == TASK_FD_PTY_M) {
             pty_unref(t->fds[i].handle, 1);
         } else if (t->fds[i].type == TASK_FD_PTY_S) {
@@ -811,6 +828,26 @@ int task_alive(int pid) {
         return t->state != TASK_ZOMBIE;
     }
     return 0;
+}
+
+/* dup2 для pipe/PTY (файлы идут через vfs_dup2). Копирует запись fd и
+   берёт дополнительную ссылку на ресурс. */
+int task_fd_dup2(int oldfd, int newfd) {
+    if (!g_current) return -1;
+    if (oldfd < 0 || oldfd >= TASK_FD_MAX || newfd < 0 || newfd >= TASK_FD_MAX) return -1;
+    if (oldfd == newfd) return newfd;
+    struct task_fd* src = &g_current->fds[oldfd];
+    if (src->type == TASK_FD_NONE) return -1;
+    uint8_t ty = src->type;
+    int handle = src->handle;
+    if (ty == TASK_FD_PIPE_R) pipe_ref(handle, 0);
+    else if (ty == TASK_FD_PIPE_W) pipe_ref(handle, 1);
+    else if (ty == TASK_FD_PTY_M) pty_ref(handle, 1);
+    else if (ty == TASK_FD_PTY_S) pty_ref(handle, 0);
+    else return -1;
+    task_fd_close(newfd);
+    g_current->fds[newfd] = *src;
+    return newfd;
 }
 
 static struct task* sched_pick_next(void) {
