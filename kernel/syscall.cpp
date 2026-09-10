@@ -10,6 +10,7 @@
 #include "drivers/input/keyboard.h"
 #include "sched/task.h"
 #include "mm/paging.h"
+#include "pipe.h"
 #include <stddef.h>
 
 extern "C" void syscall_handler_asm();
@@ -111,6 +112,15 @@ extern "C" int syscall_handler(struct syscall_args* args, uint32_t caller_cs) {
                 if (heap_used) free(kbuf);
                 return n;
             }
+            if (fd >= 0 && fd < TASK_FD_MAX && task_fd_get(fd, &ty, &handle) == 0 &&
+                ty == TASK_FD_PIPE_R) {
+                char kb[512];
+                uint32_t n = ulen < sizeof(kb) ? (uint32_t)ulen : (uint32_t)sizeof(kb);
+                int r = pipe_read(handle, kb, n);
+                if (r > 0 && user_copy_out(ubuf, kb, (uint32_t)r, caller_cs, usermax) != 0)
+                    return -1;
+                return r;
+            }
             /* Не занятое файлом fd 0-2 — консоль (stdin: клавиатура). */
             if (fd >= 0 && fd <= 2) {
                 char kb[128];
@@ -146,6 +156,8 @@ extern "C" int syscall_handler(struct syscall_args* args, uint32_t caller_cs) {
             if (fd >= 0 && fd < TASK_FD_MAX && task_fd_get(fd, &ty, &handle) == 0 &&
                 ty == TASK_FD_FILE) {
                 res = vfs_fwrite(fd, kbuf, ulen);
+            } else if (fd >= 0 && fd < TASK_FD_MAX && ty == TASK_FD_PIPE_W) {
+                res = pipe_write(handle, kbuf, ulen);
             } else if (fd >= 0 && fd <= 2) {
                 res = console_write((const char*)kbuf, (uint32_t)ulen);
             } else {
@@ -166,8 +178,17 @@ extern "C" int syscall_handler(struct syscall_args* args, uint32_t caller_cs) {
             return vfs_open(path, flags, mode);
         }
 
-        case SYS_CLOSE:
+        case SYS_CLOSE: {
+            uint8_t cty = 0;
+            int chandle = -1;
+            if (task_fd_get((int)args->arg1, &cty, &chandle) == 0 &&
+                (cty == TASK_FD_PIPE_R || cty == TASK_FD_PIPE_W)) {
+                pipe_close(chandle, cty == TASK_FD_PIPE_W);
+                task_fd_close((int)args->arg1);
+                return 0;
+            }
             return vfs_close((int)args->arg1);
+        }
 
         case SYS_LSEEK:
             return vfs_lseek((int)args->arg1, (int32_t)args->arg2, (int)args->arg3);
@@ -368,6 +389,19 @@ extern "C" int syscall_handler(struct syscall_args* args, uint32_t caller_cs) {
         }
         case SYS_DUP2:
             return vfs_dup2((int)args->arg1, (int)args->arg2);
+        case SYS_PIPE: {
+            int idx = pipe_create();
+            if (idx < 0) return -1;
+            int rfd = task_fd_alloc(TASK_FD_PIPE_R, idx, 0);
+            int wfd = task_fd_alloc(TASK_FD_PIPE_W, idx, 0);
+            if (rfd < 0 || wfd < 0) return -1;
+            int fds[2];
+            fds[0] = rfd;
+            fds[1] = wfd;
+            if (user_copy_out((void*)args->arg1, fds, sizeof(fds), caller_cs, usermax) != 0)
+                return -1;
+            return 0;
+        }
         case SYS_GETCWD: {
             const char* cwd = task_getcwd();
             size_t cap = (size_t)args->arg2;
@@ -393,6 +427,25 @@ extern "C" int syscall_handler(struct syscall_args* args, uint32_t caller_cs) {
                 return -1;
             /* Успешный exec не возвращается — продолжение в ring3 с новым образом. */
             return task_exec_user(path);
+        }
+        case SYS_EXECVE: {
+            char path[256];
+            if (user_str_copy(path, sizeof(path), (const char*)args->arg1, caller_cs, usermax) != 0)
+                return -1;
+            const char* kargv[16];
+            static char abuf[16][128];
+            int argc = 0;
+            uint32_t uargv = args->arg2;
+            if (uargv) {
+                for (; argc < 16; argc++) {
+                    uint32_t uptr = 0;
+                    if (user_copy_in(&uptr, (const void*)(uargv + (uint32_t)argc * 4), 4, caller_cs, usermax) != 0) break;
+                    if (uptr == 0) break;
+                    if (user_str_copy(abuf[argc], sizeof(abuf[argc]), (const char*)uptr, caller_cs, usermax) != 0) break;
+                    kargv[argc] = abuf[argc];
+                }
+            }
+            return task_exec_user_argv(path, argc, kargv);
         }
         case SYS_EXIT:
             task_exit();

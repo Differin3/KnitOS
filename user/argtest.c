@@ -19,6 +19,24 @@ int main(int argc, char** argv) {
     } else {
         printf("malloc: FAILED\n");
     }
+
+    int pfd[2];
+    if (sys_pipe(pfd) == 0) {
+        const char* msg = "pipe roundtrip OK";
+        sys_write(pfd[1], msg, strlen(msg));
+        sys_close(pfd[1]);
+        char rbuf[64];
+        int n = (int)sys_read(pfd[0], rbuf, sizeof(rbuf) - 1);
+        if (n > 0) {
+            rbuf[n] = 0;
+            printf("pipe: %s\n", rbuf);
+        } else {
+            printf("pipe: read failed (%d)\n", n);
+        }
+        sys_close(pfd[0]);
+    } else {
+        printf("pipe: create failed\n");
+    }
     printf("argtest done\n");
     return 0;
 }
