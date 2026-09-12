@@ -19,6 +19,7 @@ struct kpty {
     int master_refs;
     int slave_refs;
     int sigint;
+    int eof;
 };
 
 static struct kpty g_ptys[KPTY_MAX];
@@ -49,6 +50,7 @@ int pty_create(void) {
         p->master_refs = 0;
         p->slave_refs = 0;
         p->sigint = 0;
+        p->eof = 0;
         return i;
     }
     return -1;
@@ -98,6 +100,12 @@ int pty_master_write(int idx, const void* buf, uint32_t n) {
             p->sigint = 1;
             pty_echo(p, "^C\r\n");
             p->line_len = 0;
+        } else if (c == 0x04) {
+            /* Ctrl+D: отдать накопленную строку и выставить EOF (без эха). */
+            for (uint32_t k = 0; k < p->line_len; k++)
+                ring_push(p->in_buf, &p->in_head, &p->in_count, p->line[k]);
+            p->line_len = 0;
+            p->eof = 1;
         } else {
             if (p->line_len < KPTY_BUF) p->line[p->line_len++] = c;
             ring_push(p->out_buf, &p->out_head, &p->out_count, c);
@@ -143,6 +151,7 @@ int pty_slave_read(int idx, void* buf, uint32_t n) {
             continue;
         }
         if (i > 0) break;
+        if (p->in_count == 0 && p->eof) { p->eof = 0; break; } /* Ctrl+D EOF */
         if (p->master_refs == 0) break; /* EOF: мастер закрыт */
         sched_yield();
     }

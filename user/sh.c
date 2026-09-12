@@ -83,7 +83,14 @@ static void run_builtin(char** argv, int* handled) {
         }
         sys_close(fd);
     } else if (!strcmp(argv[0], "cat")) {
-        if (!argv[1]) { printf("cat: usage: cat <file>\n"); return; }
+        if (!argv[1]) {
+            /* Без аргумента читаем stdin (как в Linux). */
+            char buf[512];
+            long n;
+            while ((n = sys_read(0, buf, sizeof(buf))) > 0)
+                sys_write(1, buf, (unsigned long)n);
+            return;
+        }
         int fd = (int)sys_open(argv[1], O_RDONLY, 0);
         if (fd < 0) { printf("cat: %s: no such file\n", argv[1]); return; }
         char buf[512];
@@ -115,9 +122,71 @@ static void child_run(char** argv) {
     run_exec(argv);
 }
 
+static void run_line(char* line) {
+    strcpy(g_cmdline, line);
+    int na = tokenize(line, g_argv, AMAX);
+    if (na == 0) return;
+
+    int pipe_at = -1;
+    for (int i = 0; i < na; i++) {
+        if (!strcmp(g_argv[i], "|")) { pipe_at = i; break; }
+    }
+    if (pipe_at > 0 && pipe_at < na - 1) {
+        g_argv[pipe_at] = 0;
+        char** left = g_argv;
+        char** right = &g_argv[pipe_at + 1];
+        int fds[2];
+        if (sys_pipe(fds) < 0) { printf("sh: pipe failed\n"); return; }
+        long p1 = sys_fork();
+        if (p1 == 0) {
+            sys_dup2(fds[1], 1);
+            sys_close(fds[0]);
+            sys_close(fds[1]);
+            child_run(left);
+        }
+        long p2 = sys_fork();
+        if (p2 == 0) {
+            sys_dup2(fds[0], 0);
+            sys_close(fds[0]);
+            sys_close(fds[1]);
+            child_run(right);
+        }
+        sys_close(fds[0]);
+        sys_close(fds[1]);
+        int st;
+        if (p1 > 0) sys_waitpid((int)p1, &st);
+        if (p2 > 0) sys_waitpid((int)p2, &st);
+        return;
+    }
+
+    int handled = 0;
+    run_builtin(g_argv, &handled);
+    if (!handled) {
+        /* Try a kernel command (full line, args included), else exec.
+           sys_kcmd returns >=0 if the kernel handled it (0 = no output),
+           or <0 if unknown — then run an external /tmp/<name>.elf. */
+        static char kout[4096];
+        long n = sys_kcmd(g_cmdline, kout, sizeof(kout));
+        if (n >= 0) {
+            if (n > 0) sys_write(1, kout, (unsigned long)n);
+        } else {
+            long pid = sys_fork();
+            if (pid == 0) run_exec(g_argv);
+            if (pid > 0) { int st; sys_waitpid((int)pid, &st); }
+            else printf("sh: fork failed\n");
+        }
+    }
+}
+
 int main(int argc, char** argv) {
-    (void)argc;
-    (void)argv;
+    /* Non-interactive: sh -c "command" (used by sshd for exec requests). */
+    if (argc >= 3 && !strcmp(argv[1], "-c")) {
+        char line[LMAX];
+        strncpy(line, argv[2], LMAX - 1);
+        line[LMAX - 1] = 0;
+        run_line(line);
+        return 0;
+    }
     for (;;) {
         char cwd[128];
         if (sys_getcwd(cwd, sizeof(cwd)) < 0) cwd[0] = 0;
@@ -127,59 +196,7 @@ int main(int argc, char** argv) {
         int n = read_line(g_line, sizeof(g_line));
         if (n == -2) { printf("\n"); break; }
         if (n <= 0) continue;
-        strcpy(g_cmdline, g_line);
-        int na = tokenize(g_line, g_argv, AMAX);
-        if (na == 0) continue;
-
-        int pipe_at = -1;
-        for (int i = 0; i < na; i++) {
-            if (!strcmp(g_argv[i], "|")) { pipe_at = i; break; }
-        }
-        if (pipe_at > 0 && pipe_at < na - 1) {
-            g_argv[pipe_at] = 0;
-            char** left = g_argv;
-            char** right = &g_argv[pipe_at + 1];
-            int fds[2];
-            if (sys_pipe(fds) < 0) { printf("sh: pipe failed\n"); continue; }
-            long p1 = sys_fork();
-            if (p1 == 0) {
-                sys_dup2(fds[1], 1);
-                sys_close(fds[0]);
-                sys_close(fds[1]);
-                child_run(left);
-            }
-            long p2 = sys_fork();
-            if (p2 == 0) {
-                sys_dup2(fds[0], 0);
-                sys_close(fds[0]);
-                sys_close(fds[1]);
-                child_run(right);
-            }
-            sys_close(fds[0]);
-            sys_close(fds[1]);
-            int st;
-            if (p1 > 0) sys_waitpid((int)p1, &st);
-            if (p2 > 0) sys_waitpid((int)p2, &st);
-            continue;
-        }
-
-        int handled = 0;
-        run_builtin(g_argv, &handled);
-        if (!handled) {
-            /* Try a kernel command (full line, args included), else exec.
-               sys_kcmd returns >=0 if the kernel handled it (0 = no output),
-               or <0 if unknown — then run an external /tmp/<name>.elf. */
-            static char kout[4096];
-            long n = sys_kcmd(g_cmdline, kout, sizeof(kout));
-            if (n >= 0) {
-                if (n > 0) sys_write(1, kout, (unsigned long)n);
-            } else {
-                long pid = sys_fork();
-                if (pid == 0) run_exec(g_argv);
-                if (pid > 0) { int st; sys_waitpid((int)pid, &st); }
-                else printf("sh: fork failed\n");
-            }
-        }
+        run_line(g_line);
     }
     return 0;
 }

@@ -473,8 +473,8 @@ static int do_userauth(void) {
     return 0;
 }
 
-/* ---------------- connection + PTY shell ---------------- */
-static int start_shell(void) {
+/* ---------------- connection + PTY session ---------------- */
+static int run_session(const char* initial_cmd) {
     int pfd[2];
     if (sys_pty_open(pfd) < 0) return -1;
     int master = pfd[0], slave = pfd[1];
@@ -487,90 +487,47 @@ static int start_shell(void) {
         if (master > 2) sys_close(master);
         if (g_shell_uid != 0) sys_setuid(g_shell_uid);
         sys_chdir(g_shell_uid == 0 ? "/root" : "/");
-        char* av[2];
+        char* av[4];
         av[0] = (char*)"/tmp/sh.elf";
-        av[1] = 0;
+        if (initial_cmd) {
+            av[1] = (char*)"-c";
+            av[2] = (char*)initial_cmd;
+            av[3] = 0;
+        } else {
+            av[1] = 0;
+        }
         sys_execve("/tmp/sh.elf", av, 0);
         sys_exit(127);
     }
     sys_close(slave);
 
+    /* Child: client -> master (forward stdin, watch for disconnect). */
     long relay = sys_fork();
     if (relay == 0) {
-        /* master -> client (CHANNEL_DATA) */
+        static uint8_t rpkt[2048];
+        uint32_t rlen;
         for (;;) {
-            char data[1024];
-            uint32_t lim = sizeof(data);
-            if (g_maxpkt > 16 && g_maxpkt - 16 < lim) lim = g_maxpkt - 16;
-            long r = sys_read(master, data, lim);
-            if (r <= 0) break;
-            uint8_t p[1100]; struct buf b; b.p = p; b.len = 0; b.cap = sizeof(p);
-            bw_u8(&b, MSG_CHANNEL_DATA);
-            bw_u32(&b, g_chan);
-            bw_str(&b, data, (uint32_t)r);
-            if (ssh_send(p, b.len) < 0) break;
+            if (ssh_recv(rpkt, &rlen) < 0) break;   /* client gone */
+            uint8_t t = rpkt[0];
+            struct br r; r.p = rpkt; r.len = rlen; r.pos = 1;
+            if (t == MSG_CHANNEL_DATA) {
+                br_u32(&r);
+                uint32_t dn = br_u32(&r);
+                const uint8_t* d = br_raw(&r, dn);
+                if (dn) sys_write(master, d, dn);
+            } else if (t == MSG_CHANNEL_EOF) {
+                /* stdin closed: deliver EOF to the app */
+                char eof = 4;
+                sys_write(master, &eof, 1);
+            } else if (t == MSG_CHANNEL_CLOSE || t == MSG_DISCONNECT) {
+                break;
+            }
         }
-        uint8_t eof[5]; struct buf eb; eb.p = eof; eb.len = 0; eb.cap = sizeof(eof);
-        bw_u8(&eb, MSG_CHANNEL_EOF); bw_u32(&eb, g_chan);
-        ssh_send(eof, eb.len);
+        sys_kill((int)sh, 0);   /* unblock the parent's master read */
         sys_exit(0);
     }
 
-    /* client -> master */
-    static uint8_t pkt[2048];
-    uint32_t plen;
-    for (;;) {
-        if (ssh_recv(pkt, &plen) < 0) break;
-        uint8_t t = pkt[0];
-        struct br r; r.p = pkt; r.len = plen; r.pos = 1;
-        if (t == MSG_CHANNEL_DATA) {
-            br_u32(&r); /* recipient */
-            uint32_t dn = br_u32(&r);
-            const uint8_t* d = br_raw(&r, dn);
-            if (dn) sys_write(master, d, dn);
-        } else if (t == MSG_CHANNEL_CLOSE || t == MSG_CHANNEL_EOF) {
-            break;
-        } else if (t == MSG_CHANNEL_WINDOW_ADJUST) {
-            /* ignore */
-        } else if (t == MSG_GLOBAL_REQUEST) {
-            /* ignore: only the relay child may send s2c packets (shared seq) */
-        } else if (t == MSG_DISCONNECT) {
-            break;
-        }
-    }
-    sys_kill((int)relay, 0);
-    sys_kill((int)sh, 0);
-    int st;
-    sys_waitpid((int)relay, &st);
-    sys_waitpid((int)sh, &st);
-    sys_close(master);
-    return 0;
-}
-
-static int start_exec(const char* cmd) {
-    int pfd[2];
-    if (sys_pty_open(pfd) < 0) return -1;
-    int master = pfd[0], slave = pfd[1];
-    long sh = sys_fork();
-    if (sh == 0) {
-        sys_dup2(slave, 0);
-        sys_dup2(slave, 1);
-        sys_dup2(slave, 2);
-        if (slave > 2) sys_close(slave);
-        if (master > 2) sys_close(master);
-        if (g_shell_uid != 0) sys_setuid(g_shell_uid);
-        sys_chdir(g_shell_uid == 0 ? "/root" : "/");
-        char* av[2];
-        av[0] = (char*)"/tmp/sh.elf";
-        av[1] = 0;
-        sys_execve("/tmp/sh.elf", av, 0);
-        sys_exit(127);
-    }
-    sys_close(slave);
-    sys_write(master, cmd, (unsigned long)strlen(cmd));
-    sys_write(master, "\nexit\n", 6);
-
-    uint64_t sc = 0;
+    /* Parent: master -> client (relay all output until the shell exits). */
     for (;;) {
         char data[1024];
         uint32_t lim = sizeof(data);
@@ -584,24 +541,30 @@ static int start_exec(const char* cmd) {
         if (ssh_send(p, b.len) < 0) break;
     }
     {
-        uint8_t es[64]; struct buf eb; eb.p = es; eb.len = 0; eb.cap = sizeof(es);
-        bw_u8(&eb, MSG_CHANNEL_REQUEST);
-        bw_u32(&eb, g_chan);
-        bw_str(&eb, "exit-status", 11);
-        bw_u8(&eb, 0);
-        bw_u32(&eb, 0);
-        ssh_send(es, eb.len);
+        uint8_t es[64]; struct buf xb; xb.p = es; xb.len = 0; xb.cap = sizeof(es);
+        bw_u8(&xb, MSG_CHANNEL_REQUEST);
+        bw_u32(&xb, g_chan);
+        bw_str(&xb, "exit-status", 11);
+        bw_u8(&xb, 0);
+        bw_u32(&xb, 0);
+        ssh_send(es, xb.len);
     }
-    uint8_t e[5]; struct buf eb; eb.p = e; eb.len = 0; eb.cap = sizeof(e);
-    bw_u8(&eb, MSG_CHANNEL_EOF); bw_u32(&eb, g_chan); ssh_send(e, eb.len);
-    struct buf cb; cb.p = e; cb.len = 0; cb.cap = sizeof(e);
-    bw_u8(&cb, MSG_CHANNEL_CLOSE); bw_u32(&cb, g_chan); ssh_send(e, cb.len);
-    sys_kill((int)sh, 0);
+    {
+        uint8_t e[5]; struct buf eb; eb.p = e; eb.len = 0; eb.cap = sizeof(e);
+        bw_u8(&eb, MSG_CHANNEL_EOF); bw_u32(&eb, g_chan); ssh_send(e, eb.len);
+        struct buf cb; cb.p = e; cb.len = 0; cb.cap = sizeof(e);
+        bw_u8(&cb, MSG_CHANNEL_CLOSE); bw_u32(&cb, g_chan); ssh_send(e, cb.len);
+    }
+    sys_kill((int)relay, 0);
     int st;
+    sys_waitpid((int)relay, &st);
     sys_waitpid((int)sh, &st);
     sys_close(master);
     return 0;
 }
+
+static int start_shell(void) { return run_session(0); }
+static int start_exec(const char* cmd) { return run_session(cmd); }
 
 static int do_connection(void) {
     static uint8_t pkt[2048];
