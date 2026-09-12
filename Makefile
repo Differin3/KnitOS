@@ -86,6 +86,7 @@ KERNEL_OBJ = boot/boot.o boot/interrupts.o boot/user_demo.o kernel/sched/switch.
 	kernel/pipe.o \
 	kernel/kcmd.o \
 	kernel/pty.o \
+	kernel/service.o \
 	kernel/drivers/network/nic.o kernel/drivers/network/socket.o \
 	kernel/drivers/network/core/skb.o kernel/drivers/network/core/netif.o \
 	kernel/drivers/network/core/net_queue.o kernel/drivers/network/core/net_rx.o \
@@ -264,6 +265,9 @@ kernel/kcmd.o: kernel/kcmd.cpp kernel/kcmd.h kernel/kernel.h kernel/sched/task.h
 
 kernel/pty.o: kernel/pty.cpp kernel/pty.h kernel/sched/task.h
 	$(CC) $(CFLAGS) -c -o kernel/pty.o kernel/pty.cpp
+
+kernel/service.o: kernel/service.cpp kernel/service.h kernel/sched/task.h kernel/vfs.h
+	$(CC) $(CFLAGS) -c -o kernel/service.o kernel/service.cpp
 
 kernel/drivers/storage/ata.o: $(ATA_SRC) kernel/drivers/storage/ata.h
 	$(CC) $(CFLAGS) -c -o kernel/drivers/storage/ata.o $(ATA_SRC)

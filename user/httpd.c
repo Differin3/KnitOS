@@ -11,23 +11,13 @@ int main(int argc, char** argv) {
     (void)argv;
     int port = 8080;
     int fd = (int)sys_socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) {
-        printf("httpd: socket() failed\n");
-        return 1;
-    }
+    if (fd < 0) return 1;
     struct sockaddr_in addr;
     addr.sin_family = AF_INET;
     addr.sin_port = (unsigned short)port;
     addr.sin_addr = 0;
-    if (sys_bind(fd, &addr) < 0) {
-        printf("httpd: bind() failed\n");
-        return 1;
-    }
-    if (sys_listen(fd, 4) < 0) {
-        printf("httpd: listen() failed\n");
-        return 1;
-    }
-    printf("httpd: listening on port %d\n", port);
+    if (sys_bind(fd, &addr) < 0) return 1;
+    if (sys_listen(fd, 4) < 0) return 1;
 
     for (;;) {
         int c = (int)sys_accept(fd, 10000);

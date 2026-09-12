@@ -1,5 +1,6 @@
 #include "kernel.h"
 #include "idt.h"
+#include "service.h"
 #include "drivers/input/keyboard.h"
 #include "drivers/video/terminal.h"
 #include "drivers/storage/ata.h"
@@ -482,6 +483,7 @@ static void boot_populate_user_bins(void) {
     extern char user_sh_start[], user_sh_end[];
     extern char user_ksshd_start[], user_ksshd_end[];
     extern char user_sshd_start[], user_sshd_end[];
+    extern char user_httpd_start[], user_httpd_end[];
     static const struct {
         const char* path;
         char* start;
@@ -496,6 +498,7 @@ static void boot_populate_user_bins(void) {
         { "/tmp/sh.elf",        user_sh_start,      user_sh_end },
         { "/tmp/ksshd.elf",     user_ksshd_start,   user_ksshd_end },
         { "/tmp/sshd.elf",      user_sshd_start,    user_sshd_end },
+        { "/tmp/httpd.elf",     user_httpd_start,   user_httpd_end },
     };
     for (unsigned i = 0; i < sizeof(bins) / sizeof(bins[0]); i++) {
         size_t sz = (size_t)(bins[i].end - bins[i].start);
@@ -505,6 +508,22 @@ static void boot_populate_user_bins(void) {
         }
     }
     log_msg(LOG_INFO, "boot", "user bins installed to /tmp");
+}
+
+/* Регистрация сервисов для init/service manager (см. service.cpp). */
+static void boot_register_services(void) {
+    extern char user_sshd_start[], user_sshd_end[];
+    extern char user_ksshd_start[], user_ksshd_end[];
+    extern char user_httpd_start[], user_httpd_end[];
+    service_register("sshd", "SSHv2 server :2222",
+                     (const uint8_t*)user_sshd_start,
+                     (size_t)(user_sshd_end - user_sshd_start), 0, 1, 1);
+    service_register("httpd", "HTTP server :8080",
+                     (const uint8_t*)user_httpd_start,
+                     (size_t)(user_httpd_end - user_httpd_start), 1000, 0, 1);
+    service_register("ksshd", "legacy KnitOS shell server :2200",
+                     (const uint8_t*)user_ksshd_start,
+                     (size_t)(user_ksshd_end - user_ksshd_start), 0, 0, 1);
 }
 
 // Точка входа ядра (multiboot2 info pointer; 0 if unavailable)
@@ -777,6 +796,7 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
     interrupts_enable();
 
     boot_populate_user_bins();
+    boot_register_services();
 
     boot_advance_row();
     if (network_config_apply_boot() == 0 && ip_get_our_ip() != 0) {
@@ -823,6 +843,7 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
             print_status("OK", "dhcpd kthread", vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK));
             boot_advance_row();
         }
+        service_init();
     }
     
     boot_advance_row();
@@ -1478,6 +1499,70 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
             while (*us >= '0' && *us <= '9') { n = n * 10 + (*us - '0'); us++; }
             if (switch_session(n) != 0) { terminal_writestring("\nsession: invalid slot"); flush_line(); return; }
             return; /* switch_session уже напечатал промпт — без flush_line */
+        }
+
+        // Команда systemctl - управление сервисами (init/service manager)
+        if (cmd_name_len==9 && strncmp(cmd_name, "systemctl", 9) == 0) {
+            const char* sub = (argc >= 2) ? argv[1] : "list";
+            if (strcmp(sub, "list") == 0 || strcmp(sub, "status") == 0) {
+                if (argc >= 3) {
+                    const char* want = argv[2];
+                    for (int i = 0; i < service_count(); i++) {
+                        const char *nm, *ds; int st, pid, rs, en;
+                        service_get(i, &nm, &ds, &st, &pid, &rs, &en);
+                        if (strcmp(nm, want) != 0) continue;
+                        terminal_writestring("\n");
+                        terminal_writestring(nm);
+                        terminal_writestring(" - ");
+                        terminal_writestring(ds);
+                        terminal_writestring("\n  State:    ");
+                        terminal_writestring(st==SVC_RUNNING?"running":(st==SVC_FAILED?"failed":"stopped"));
+                        terminal_writestring("\n  Enabled:  ");
+                        terminal_writestring(en?"yes":"no");
+                        terminal_writestring("\n  PID:      ");
+                        shell_write_u32(pid>0?(uint32_t)pid:0u);
+                        terminal_writestring("\n  Restarts: ");
+                        shell_write_u32((uint32_t)rs);
+                        flush_line(); return;
+                    }
+                    terminal_writestring("\nsystemctl: unknown unit");
+                    flush_line(); return;
+                }
+                terminal_writestring("\nUNIT    STATE     ENABLED   PID  RESTARTS  DESCRIPTION");
+                for (int i = 0; i < service_count(); i++) {
+                    const char *nm, *ds; int st, pid, rs, en;
+                    service_get(i, &nm, &ds, &st, &pid, &rs, &en);
+                    terminal_writestring("\n  ");
+                    terminal_writestring(nm);
+                    terminal_writestring("  ");
+                    terminal_writestring(st==SVC_RUNNING?"running":(st==SVC_FAILED?"failed ":"stopped"));
+                    terminal_writestring("  ");
+                    terminal_writestring(en?"enabled ":"disabled");
+                    terminal_writestring("  ");
+                    shell_write_u32(pid>0?(uint32_t)pid:0u);
+                    terminal_writestring("  ");
+                    shell_write_u32((uint32_t)rs);
+                    terminal_writestring("  ");
+                    terminal_writestring(ds);
+                }
+                flush_line(); return;
+            }
+            if (argc < 3) {
+                terminal_writestring("\nUsage: systemctl list | start|stop|restart|enable|disable <unit>");
+                flush_line(); return;
+            }
+            const char* unit = argv[2];
+            int rc = -1;
+            if (strcmp(sub, "start") == 0) rc = service_start(unit);
+            else if (strcmp(sub, "stop") == 0) rc = service_stop(unit);
+            else if (strcmp(sub, "restart") == 0) rc = service_restart(unit);
+            else if (strcmp(sub, "enable") == 0) { rc = service_set_enabled(unit, 1); if (rc == 0) service_save_config(); }
+            else if (strcmp(sub, "disable") == 0) { rc = service_set_enabled(unit, 0); if (rc == 0) service_save_config(); }
+            else { terminal_writestring("\nsystemctl: unknown action"); flush_line(); return; }
+            terminal_writestring("\n");
+            terminal_writestring(unit);
+            terminal_writestring(rc == 0 ? ": ok" : ": failed");
+            flush_line(); return;
         }
 
         // Команда groupadd - создать группу (только root)
@@ -4284,7 +4369,7 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
     static const char* shell_commands[] = {
         "help", "ls", "find", "cd", "pwd", "clear", "echo", "version", "date", "setdate", "settime", "runelf", "disk", "ps", "kill",
         "login", "logout", "whoami", "id", "users", "useradd", "userdel", "usermod", "groupadd", "groups", "passwd", "su", "chgrp",
-        "sessions", "session", "newsession",
+        "sessions", "session", "newsession", "systemctl",
         "cat", "nano", "write", "rm", "reboot", "shutdown", "poweroff", "acpi", "resolution", "test",
         "network", "ifconfig", "dhcp", "ip", "udp", "tcp", "udplisten", "ping", "traceroute", "tcpdump", "httpget", "httpserver", "rshd", "ftpd", "dns", "arp", "netstat", "ports", "port", "route", "socktest", "cryptotest", "log", "autotest", 0
     };
