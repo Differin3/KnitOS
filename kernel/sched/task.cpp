@@ -476,11 +476,13 @@ int task_wait_child(int pid, int* status_out) {
     if (!g_sched_ready || !g_current) return -1;
     int parent = g_current->id;
     for (;;) {
+        int found = 0;
         for (int i = 0; i < TASK_MAX; i++) {
             struct task* c = &g_tasks[i];
             if (c->state == TASK_UNUSED) continue;
             if (c->parent_pid != parent) continue;
             if (pid >= 0 && c->id != pid) continue;
+            found = 1;
             if (c->state == TASK_ZOMBIE) {
                 int cid = c->id;
                 task_slot_clear(c);
@@ -488,6 +490,9 @@ int task_wait_child(int pid, int* status_out) {
                 return cid;
             }
         }
+        /* Ребёнка с запрошенным pid больше нет (например, его зомби-слот
+           переиспользован) — не висим вечно, как раньше. */
+        if (pid >= 0 && !found) return -1;
         sched_yield();
     }
 }

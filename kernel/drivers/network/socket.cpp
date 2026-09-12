@@ -327,7 +327,13 @@ static int socket_tcp_try_recv(struct socket_entry* s, void* buf, size_t len) {
     if (!s->tcp) return -1;
     int n = tcp_recv_data(s->tcp, buf, len);
     if (n > 0) return n;
-    if (s->tcp->state == TCP_CLOSED || !s->tcp->valid) return -1;
+    /* EOF, если соединение закрывается с любой стороны: клиент прислал
+       FIN (CLOSE_WAIT) или мы/соединение закрылись. Иначе recv висел бы
+       до таймаута и блокировал sshd. */
+    enum tcp_state st = s->tcp->state;
+    if (st == TCP_CLOSED || st == TCP_CLOSE_WAIT || st == TCP_CLOSING ||
+        st == TCP_TIME_WAIT || st == TCP_LAST_ACK || !s->tcp->valid)
+        return -1;
     return 0;
 }
 
