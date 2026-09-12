@@ -203,6 +203,9 @@ int task_spawn_user_uid(const uint8_t* elf_img, size_t elf_len, const char* name
         }
         for (uint32_t va = lo & ~(USER_STACK_SLOT_STEP - 1u); va < hi; va += USER_STACK_SLOT_STEP) {
             paging_mark_user_pde(dir, va >> 22);
+            /* Приватный кадр под код/данные: иначе второе user-приложение
+               затрёт код первого по общему адресу 0x800000. */
+            paging_privatize_user_pde(dir, va >> 22);
         }
         paging_mark_user_pde(dir, (t->user_stack - USER_STACK_SLOT_STEP) >> 22);
     }
@@ -268,6 +271,7 @@ int task_exec_user_argv(const char* path, int argc, const char* const* argv) {
     }
     for (uint32_t va = lo & ~(USER_STACK_SLOT_STEP - 1u); va < hi; va += USER_STACK_SLOT_STEP) {
         paging_mark_user_pde(t->cr3, va >> 22);
+        paging_privatize_user_pde(t->cr3, va >> 22);
     }
     uint32_t nstack = user_stack_alloc();
     paging_mark_user_pde(t->cr3, (nstack - USER_STACK_SLOT_STEP) >> 22);
