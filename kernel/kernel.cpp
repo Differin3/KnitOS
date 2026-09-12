@@ -1204,7 +1204,9 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
         while(1) asm volatile ("hlt");
     };
     
+    bool cmd_handled = true;
     auto process_command = [&](const char* cmd, size_t len) {
+        cmd_handled = true;
         while (len && cmd[len-1]==' ') len--;
         const char* cwd = utils_get_current_directory();
         if (len > 0) {
@@ -4274,6 +4276,7 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
             flush_line(); return;
         }
         
+        cmd_handled = false;
         terminal_writestring("\nUnknown command");
         flush_line();
     };
@@ -4693,7 +4696,11 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
                 terminal_capture_begin(kernel_kcmd_resp(), kernel_kcmd_resp_cap());
                 process_command(kc, strlen(kc));
                 size_t rl = terminal_capture_end();
-                kernel_kcmd_reply(rl);
+                /* Если команда не распознана — сообщаем user-space, чтобы он
+                   попробовал exec'нуть внешнее приложение, а не печатал
+                   «Unknown command». */
+                if (!cmd_handled) kernel_kcmd_reply_notfound();
+                else kernel_kcmd_reply(rl);
                 /* Восстановить приглашение (захваченный вывод не рисовался). */
                 prompt_row = terminal_get_row();
                 line_len = 0;

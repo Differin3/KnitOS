@@ -166,11 +166,13 @@ int main(int argc, char** argv) {
         int handled = 0;
         run_builtin(g_argv, &handled);
         if (!handled) {
-            /* Try a kernel command (full line, args included), else exec. */
+            /* Try a kernel command (full line, args included), else exec.
+               sys_kcmd returns >=0 if the kernel handled it (0 = no output),
+               or <0 if unknown — then run an external /tmp/<name>.elf. */
             static char kout[4096];
             long n = sys_kcmd(g_cmdline, kout, sizeof(kout));
-            if (n > 0) {
-                sys_write(1, kout, (unsigned long)n);
+            if (n >= 0) {
+                if (n > 0) sys_write(1, kout, (unsigned long)n);
             } else {
                 long pid = sys_fork();
                 if (pid == 0) run_exec(g_argv);

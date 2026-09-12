@@ -15,5 +15,7 @@ int    kernel_kcmd_take(char* cmd, size_t cap);
 char*  kernel_kcmd_resp(void);
 size_t kernel_kcmd_resp_cap(void);
 void   kernel_kcmd_reply(size_t len);
+/* Команда не распознана ядром — user-space должен попробовать exec. */
+void   kernel_kcmd_reply_notfound(void);
 
 #endif

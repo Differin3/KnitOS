@@ -42,6 +42,11 @@ void kernel_kcmd_reply(size_t len) {
     g_state = 2;
 }
 
+void kernel_kcmd_reply_notfound(void) {
+    g_resp_len = 0;
+    g_state = 3;
+}
+
 /* ---- subset fallback (used if the console shell is not available) ---- */
 
 struct sb { char* p; size_t cap; size_t len; };
@@ -98,7 +103,7 @@ static int kcmd_fallback(const char* cmd, char* out, size_t cap) {
         sb_str(&s, " free="); sb_u32(&s, freeb);
         sb_str(&s, "\n");
     } else {
-        return 0;
+        return -1;
     }
     if (s.len < s.cap) s.p[s.len] = 0;
     return (int)s.len;
@@ -128,6 +133,12 @@ int kernel_run_command(const char* cmd, char* out, size_t cap) {
         for (size_t i = 0; i < rl; i++) out[i] = g_resp[i];
         g_state = 0;
         return (int)rl;
+    }
+
+    if (g_state == 3) {
+        /* Команда не распознана ядром: пусть user-space попробует exec. */
+        g_state = 0;
+        return -1;
     }
 
     /* Fallback: ограниченный набор команд, если shell недоступен. */
