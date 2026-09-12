@@ -20,6 +20,7 @@ struct kpty {
     int slave_refs;
     int sigint;
     int eof;
+    int raw;
 };
 
 static struct kpty g_ptys[KPTY_MAX];
@@ -51,6 +52,7 @@ int pty_create(void) {
         p->slave_refs = 0;
         p->sigint = 0;
         p->eof = 0;
+        p->raw = 0;
         return i;
     }
     return -1;
@@ -82,6 +84,12 @@ int pty_master_write(int idx, const void* buf, uint32_t n) {
     if (idx < 0 || idx >= KPTY_MAX || !g_ptys[idx].used) return -1;
     struct kpty* p = &g_ptys[idx];
     const uint8_t* in = (const uint8_t*)buf;
+    if (p->raw) {
+        /* Raw: байты идут как есть, без line discipline и эха. */
+        for (uint32_t i = 0; i < n; i++)
+            ring_push(p->in_buf, &p->in_head, &p->in_count, in[i]);
+        return (int)n;
+    }
     for (uint32_t i = 0; i < n; i++) {
         uint8_t c = in[i];
         if (c == '\r' || c == '\n') {
@@ -175,4 +183,9 @@ int pty_take_signal(int idx) {
     int s = g_ptys[idx].sigint;
     g_ptys[idx].sigint = 0;
     return s;
+}
+
+void pty_set_raw(int idx, int raw) {
+    if (idx < 0 || idx >= KPTY_MAX || !g_ptys[idx].used) return;
+    g_ptys[idx].raw = raw ? 1 : 0;
 }

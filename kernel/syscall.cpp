@@ -462,6 +462,17 @@ extern "C" int syscall_handler(struct syscall_args* args, uint32_t caller_cs) {
             if (fd >= 0 && fd <= 2) return 1; /* неявная консоль */
             return 0;
         }
+        case SYS_PTY_RAW: {
+            int fd = (int)args->arg1;
+            uint8_t ty = 0;
+            int h = -1;
+            if (fd >= 0 && fd < TASK_FD_MAX && task_fd_get(fd, &ty, &h) == 0 &&
+                (ty == TASK_FD_PTY_M || ty == TASK_FD_PTY_S)) {
+                pty_set_raw(h, (int)args->arg2);
+                return 0;
+            }
+            return -1;
+        }
         case SYS_CRYPTO: {
             struct kcrypto_req req;
             if (user_copy_in(&req, (const void*)args->arg1, sizeof(req), caller_cs, usermax) != 0)

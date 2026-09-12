@@ -62,6 +62,7 @@ typedef long ssize_t;
 #define SYS_ISATTY      48
 #define SYS_CRYPTO      49
 #define SYS_KCMD        50
+#define SYS_PTY_RAW     51
 
 struct kcrypto_req {
     uint32_t op;
@@ -192,6 +193,9 @@ static inline long sys_pty_open(int fds[2]) {
 }
 static inline long sys_isatty(long fd) {
     return syscall2(SYS_ISATTY, (uint32_t)fd);
+}
+static inline long sys_pty_raw(long fd, long raw) {
+    return syscall3(SYS_PTY_RAW, (uint32_t)fd, (uint32_t)raw);
 }
 static inline long sys_kcmd(const char* cmd, char* out, unsigned long cap) {
     return syscall5(SYS_KCMD, (uint32_t)(unsigned long)cmd,

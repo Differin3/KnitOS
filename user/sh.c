@@ -122,6 +122,199 @@ static void child_run(char** argv) {
     run_exec(argv);
 }
 
+/* ---------------- редактор строки (raw PTY) ---------------- */
+
+#define HIST_MAX 16
+
+static char g_hist[HIST_MAX][LMAX];
+static int  g_hist_count = 0;
+static int  g_hist_pos = -1;
+
+static void hist_add(const char* s) {
+    if (!s[0]) return;
+    if (g_hist_count > 0 && !strcmp(g_hist[g_hist_count - 1], s)) return;
+    if (g_hist_count < HIST_MAX) {
+        strcpy(g_hist[g_hist_count++], s);
+    } else {
+        for (int i = 1; i < HIST_MAX; i++) strcpy(g_hist[i - 1], g_hist[i]);
+        strcpy(g_hist[HIST_MAX - 1], s);
+    }
+}
+
+static void emit(const char* s) { sys_write(1, s, (unsigned long)strlen(s)); }
+
+static void redraw(const char* prompt, const char* buf, int len, int pos) {
+    emit("\r");
+    emit(prompt);
+    if (len > 0) sys_write(1, buf, (unsigned long)len);
+    emit("\x1b[K");
+    int back = len - pos;
+    if (back > 0) {
+        char esc[16];
+        int k = 0;
+        esc[k++] = 0x1b; esc[k++] = '[';
+        int v = back, d[8], n = 0;
+        while (v) { d[n++] = v % 10; v /= 10; }
+        while (n) esc[k++] = (char)('0' + d[--n]);
+        esc[k++] = 'D';
+        esc[k] = 0;
+        emit(esc);
+    }
+}
+
+static const char* g_cmds[] = {
+    "cd", "pwd", "ls", "cat", "touch", "rm", "echo", "id", "exit", "help",
+    "uname", "uptime", "ps", "ifconfig", "df", "ping", "traceroute", "netstat",
+    "ports", "date", "version", "whoami", "users", "groups", "find", "log",
+    "arp", "route", "httpget", "dhcp", "dns",
+    "hello", "demo3", "argtest", "ptytest", "launcher", "httpd", "sh", "ksshd", "sshd",
+    0
+};
+
+static void complete(char* buf, int* lenp, int* posp, int cap, const char* prompt) {
+    int len = *lenp, pos = *posp;
+    int start = pos;
+    while (start > 0 && buf[start - 1] != ' ' && buf[start - 1] != '\t') start--;
+    int wlen = pos - start;
+    const char* word = buf + start;
+    int first_cmd = (start == 0);
+
+    static char matches[64][64];
+    int nmatch = 0;
+    if (first_cmd) {
+        for (int i = 0; g_cmds[i] && nmatch < 64; i++) {
+            if (wlen == 0 || strncmp(g_cmds[i], word, wlen) == 0) {
+                strncpy(matches[nmatch], g_cmds[i], 63);
+                matches[nmatch][63] = 0;
+                nmatch++;
+            }
+        }
+    }
+    /* файлы текущего каталога */
+    {
+        char cwd[128];
+        const char* d = ".";
+        if (sys_getcwd(cwd, sizeof(cwd)) >= 0) d = cwd;
+        int fd = (int)sys_open(d, O_RDONLY | O_DIRECTORY, 0);
+        if (fd >= 0) {
+            char name[64];
+            long n;
+            while ((n = sys_getdents(fd, name, sizeof(name))) > 0 && nmatch < 64) {
+                if (wlen == 0 || strncmp(name, word, wlen) == 0) {
+                    strncpy(matches[nmatch], name, 63);
+                    matches[nmatch][63] = 0;
+                    nmatch++;
+                }
+            }
+            sys_close(fd);
+        }
+    }
+
+    if (nmatch == 1) {
+        const char* rest = matches[0] + wlen;
+        int rl = (int)strlen(rest);
+        if (len + rl < cap - 1) {
+            for (int i = len; i >= pos; i--) buf[i + rl] = buf[i];
+            for (int i = 0; i < rl; i++) buf[pos + i] = rest[i];
+            len += rl; pos += rl;
+            redraw(prompt, buf, len, pos);
+        }
+    } else if (nmatch > 1) {
+        emit("\r\n");
+        for (int i = 0; i < nmatch; i++) { emit(matches[i]); emit("  "); }
+        emit("\r\n");
+        redraw(prompt, buf, len, pos);
+    }
+    *lenp = len; *posp = pos;
+}
+
+static int read_line_edited(char* buf, int cap, const char* prompt) {
+    int len = 0, pos = 0;
+    g_hist_pos = -1;
+    buf[0] = 0;
+    emit(prompt);
+    for (;;) {
+        char c;
+        long r = sys_read(0, &c, 1);
+        if (r < 0) return -1;
+        if (r == 0) { emit("\n"); return -2; }
+        if (c == '\r' || c == '\n') { emit("\r\n"); buf[len] = 0; return len; }
+
+        if (c == 0x7f || c == 0x08) {
+            if (pos > 0) {
+                for (int i = pos - 1; i < len - 1; i++) buf[i] = buf[i + 1];
+                len--; pos--; buf[len] = 0;
+                redraw(prompt, buf, len, pos);
+            }
+            continue;
+        }
+        if (c == 0x1b) {
+            char a = 0, b = 0;
+            if (sys_read(0, &a, 1) <= 0) continue;
+            if (a == '[' || a == 'O') {
+                if (sys_read(0, &b, 1) <= 0) continue;
+                if (b == 'A') {
+                    if (g_hist_count == 0) continue;
+                    if (g_hist_pos < 0) g_hist_pos = g_hist_count;
+                    if (g_hist_pos > 0) g_hist_pos--;
+                    strcpy(buf, g_hist[g_hist_pos]);
+                    len = pos = (int)strlen(buf);
+                    redraw(prompt, buf, len, pos);
+                } else if (b == 'B') {
+                    if (g_hist_pos < 0) continue;
+                    if (g_hist_pos < g_hist_count - 1) {
+                        g_hist_pos++;
+                        strcpy(buf, g_hist[g_hist_pos]);
+                    } else {
+                        g_hist_pos = -1; buf[0] = 0;
+                    }
+                    len = pos = (int)strlen(buf);
+                    redraw(prompt, buf, len, pos);
+                } else if (b == 'C') {
+                    if (pos < len) { pos++; redraw(prompt, buf, len, pos); }
+                } else if (b == 'D') {
+                    if (pos > 0) { pos--; redraw(prompt, buf, len, pos); }
+                } else if (b == 'H') {
+                    pos = 0; redraw(prompt, buf, len, pos);
+                } else if (b == 'F') {
+                    pos = len; redraw(prompt, buf, len, pos);
+                } else if (b == '3') {
+                    char t; sys_read(0, &t, 1);   /* Delete: ESC [ 3 ~ */
+                    if (pos < len) {
+                        for (int i = pos; i < len - 1; i++) buf[i] = buf[i + 1];
+                        len--; buf[len] = 0;
+                        redraw(prompt, buf, len, pos);
+                    }
+                }
+            }
+            continue;
+        }
+        if (c == 0x03) { emit("^C\r\n"); len = pos = 0; buf[0] = 0; emit(prompt); continue; }
+        if (c == 0x04) {
+            if (len == 0) { emit("\n"); return -2; }
+            if (pos < len) {
+                for (int i = pos; i < len - 1; i++) buf[i] = buf[i + 1];
+                len--; buf[len] = 0;
+                redraw(prompt, buf, len, pos);
+            }
+            continue;
+        }
+        if (c == 0x01) { pos = 0; redraw(prompt, buf, len, pos); continue; }
+        if (c == 0x05) { pos = len; redraw(prompt, buf, len, pos); continue; }
+        if (c == 0x0b) { len = pos; buf[len] = 0; redraw(prompt, buf, len, pos); continue; }
+        if (c == 0x15) { len = pos = 0; buf[0] = 0; redraw(prompt, buf, len, pos); continue; }
+        if (c == '\t') { complete(buf, &len, &pos, cap, prompt); continue; }
+
+        if ((unsigned char)c >= 0x20 && len < cap - 1) {
+            for (int i = len; i > pos; i--) buf[i] = buf[i - 1];
+            buf[pos] = c; len++; pos++;
+            buf[len] = 0;
+            if (pos == len) sys_write(1, &c, 1);
+            else redraw(prompt, buf, len, pos);
+        }
+    }
+}
+
 static void run_line(char* line) {
     strcpy(g_cmdline, line);
     int na = tokenize(line, g_argv, AMAX);
@@ -187,15 +380,29 @@ int main(int argc, char** argv) {
         run_line(line);
         return 0;
     }
+    int tty = (sys_isatty(0) == 1);
+    if (tty) sys_pty_raw(0, 1);
     for (;;) {
         char cwd[128];
         if (sys_getcwd(cwd, sizeof(cwd)) < 0) cwd[0] = 0;
         const char* who = sys_getuid() == 0 ? "root" : "user";
         const char* sig = sys_getuid() == 0 ? "#" : "$";
-        printf("%s@knitos:%s%s ", who, cwd, sig);
-        int n = read_line(g_line, sizeof(g_line));
-        if (n == -2) { printf("\n"); break; }
+        char prompt[160];
+        strcpy(prompt, who);
+        strcat(prompt, "@knitos:");
+        strcat(prompt, cwd);
+        strcat(prompt, sig);
+        strcat(prompt, " ");
+        int n;
+        if (tty) {
+            n = read_line_edited(g_line, sizeof(g_line), prompt);
+        } else {
+            printf("%s", prompt);
+            n = read_line(g_line, sizeof(g_line));
+        }
+        if (n == -2) { if (!tty) printf("\n"); break; }
         if (n <= 0) continue;
+        hist_add(g_line);
         run_line(g_line);
     }
     return 0;

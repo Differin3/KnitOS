@@ -26,4 +26,7 @@ int pty_slave_write(int idx, const void* buf, uint32_t n);  /* вывод -> м�
 /* Забрать отложенный Ctrl+C (1 = был, 0 = нет). */
 int pty_take_signal(int idx);
 
+/* Режим без line discipline и эха (для редактора строки в user-space). */
+void pty_set_raw(int idx, int raw);
+
 #endif
