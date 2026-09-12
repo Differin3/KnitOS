@@ -119,7 +119,7 @@ int kernel_run_command(const char* cmd, char* out, size_t cap) {
     uint32_t t0 = timer_ms();
     while (g_state == 1) {
         sched_yield();
-        if (timer_ms_since(t0) > 3000) { g_state = 0; break; }
+        if (timer_ms_since(t0) > 30000) { g_state = 0; break; }
     }
 
     if (g_state == 2) {

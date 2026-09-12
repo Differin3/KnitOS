@@ -1897,7 +1897,7 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
                         full_path[j] = 0;
                     }
                     
-                    if (fs_write(full_path, cmd+i, len-i) == 0) {
+                    if (vfs_write(full_path, cmd+i, len-i) == 0) {
                         terminal_writestring("\nFile created");
                     } else {
                         terminal_writestring("\nError writing file");
@@ -1927,16 +1927,18 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
                 }
                 uint32_t file_size;
                 char dir_test[4];
-                if (fs_list_dir(fullpath, dir_test, sizeof(dir_test)) >= 0) {
+                struct fs_stat cst;
+                if (vfs_list(fullpath, dir_test, sizeof(dir_test)) >= 0) {
                     terminal_writestring("\n");
                     terminal_writestring(fullpath);
                     terminal_writestring(": Is a directory");
-                } else if (fs_open(fullpath, &file_size) == 0) {
+                } else if (vfs_stat(fullpath, &cst) == 0 && !(cst.flags & FS_FLAG_DIRECTORY)) {
+                    file_size = cst.size;
                     terminal_writestring("\n");
                     if (file_size == 0) {
                         terminal_writestring("(empty file)");
                     } else if (file_size < sizeof(file_read_buf)) {
-                        if (fs_read(fullpath, file_read_buf, file_size) >= 0) {
+                        if (vfs_read(fullpath, file_read_buf, file_size) >= 0) {
                             file_read_buf[file_size] = 0;
                             terminal_writestring(file_read_buf);
                         } else {
@@ -1999,7 +2001,7 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
                 terminal_writestring("\nrm: refuse to remove /");
                 flush_line(); return;
             }
-            int rc = recursive ? fs_rm_rf(fullpath) : fs_delete(fullpath);
+            int rc = recursive ? fs_rm_rf(fullpath) : vfs_unlink(fullpath);
             terminal_writestring(rc == 0 ? "\nDeleted" : "\nError deleting");
             flush_line(); return;
         }
@@ -2031,11 +2033,13 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
                 flush_line(); return;
             }
             uint32_t sz=0;
-            if (fs_open(pa,&sz)!=0) { terminal_writestring("\ncp: src missing"); flush_line(); return; }
+            struct fs_stat cst;
+            if (vfs_stat(pa,&cst)!=0 || (cst.flags & FS_FLAG_DIRECTORY)) { terminal_writestring("\ncp: src missing"); flush_line(); return; }
+            sz = cst.size;
             char* buf = (char*)malloc(sz ? sz : 1);
             if (!buf) { terminal_writestring("\ncp: oom"); flush_line(); return; }
-            if (sz && fs_read(pa, buf, sz) < 0) { free(buf); terminal_writestring("\ncp: read fail"); flush_line(); return; }
-            int w = fs_write(pb, buf, sz);
+            if (sz && vfs_read(pa, buf, sz) < 0) { free(buf); terminal_writestring("\ncp: read fail"); flush_line(); return; }
+            int w = vfs_write(pb, buf, sz);
             free(buf);
             terminal_writestring(w==0 ? "\nCopied" : "\ncp failed");
             flush_line(); return;
@@ -2255,6 +2259,19 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
             terminal_writestring(" (");
             terminal_writestring(KERNEL_BUILD);
             terminal_writestring(")");
+            flush_line(); return;
+        }
+        if (len==5 && cmd[0]=='u'&&cmd[1]=='n'&&cmd[2]=='a'&&cmd[3]=='m'&&cmd[4]=='e') {
+            terminal_writestring("\n");
+            terminal_writestring(KERNEL_NAME);
+            terminal_writestring(" ");
+            terminal_writestring(KERNEL_VERSION);
+            flush_line(); return;
+        }
+        if (len==6 && cmd[0]=='u'&&cmd[1]=='p'&&cmd[2]=='t'&&cmd[3]=='i'&&cmd[4]=='m'&&cmd[5]=='e') {
+            terminal_writestring("\nuptime: ");
+            shell_write_u32(timer_ms() / 1000);
+            terminal_writestring(" s");
             flush_line(); return;
         }
         if (len==4 && cmd[0]=='d'&&cmd[1]=='a'&&cmd[2]=='t'&&cmd[3]=='e') {
