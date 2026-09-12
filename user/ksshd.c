@@ -14,7 +14,7 @@
 // The server runs a PTY-backed shell and relays it over the secure channel.
 #include "lib/libk.h"
 
-#define KSSH_PORT 2222
+#define KSSH_PORT 2200
 
 static unsigned char g_key[32];
 static const unsigned char X25519_BASE[32] = {9};
