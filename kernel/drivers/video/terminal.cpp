@@ -133,6 +133,26 @@ static bool   g_cursor_painted = false;
 static size_t g_cursor_prow   = 0;
 static size_t g_cursor_pcol   = 0;
 
+/* Захват вывода терминала (для SYS_KCMD — выполнение команд ядра из
+   user-space и возврат вывода по SSH). */
+static char*  g_cap_buf    = 0;
+static size_t g_cap_cap    = 0;
+static size_t g_cap_len    = 0;
+static int    g_cap_active = 0;
+
+void terminal_capture_begin(char* buf, size_t cap) {
+    g_cap_buf = buf;
+    g_cap_cap = cap;
+    g_cap_len = 0;
+    g_cap_active = 1;
+}
+size_t terminal_capture_end(void) {
+    g_cap_active = 0;
+    if (g_cap_buf && g_cap_len < g_cap_cap) g_cap_buf[g_cap_len] = 0;
+    return g_cap_len;
+}
+int terminal_is_capturing(void) { return g_cap_active; }
+
 static void term_draw_cursor_at(size_t row, size_t col) {
     if (row >= term_rows || col >= term_cols) return;
     if (use_fb) {
@@ -643,6 +663,13 @@ void terminal_setcolor(uint8_t color) { terminal_color = color; }
 uint8_t terminal_getcolor() { return terminal_color; }
 
 void terminal_putchar(char c) {
+    /* Режим захвата: вывод уходит в буфер, а не на экран/в serial.
+       Используется SYS_KCMD, чтобы выполнить команду ядра и вернуть её
+       вывод в user-space shell по SSH. */
+    if (g_cap_active) {
+        if (g_cap_buf && g_cap_len + 1 < g_cap_cap) g_cap_buf[g_cap_len++] = c;
+        return;
+    }
     /* Mirror first so serial progress is not blocked by FB scroll. */
     log_mirror_char(c);
 

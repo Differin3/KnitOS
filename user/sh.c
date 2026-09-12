@@ -5,6 +5,7 @@
 #define AMAX 16
 
 static char g_line[LMAX];
+static char g_cmdline[LMAX];
 static char* g_argv[AMAX + 1];
 
 static int read_line(char* buf, int cap) {
@@ -100,6 +101,8 @@ static void run_builtin(char** argv, int* handled) {
     } else if (!strcmp(argv[0], "help")) {
         printf("builtins: cd pwd ls cat touch rm echo id exit help\n");
         printf("kernel cmds: uname uptime ps ifconfig df\n");
+        printf("all other kernel console commands also work\n");
+        printf("(ping, traceroute, netstat, ports, date, version, find, ...)\n");
     } else {
         *handled = 0;
     }
@@ -124,6 +127,7 @@ int main(int argc, char** argv) {
         int n = read_line(g_line, sizeof(g_line));
         if (n == -2) { printf("\n"); break; }
         if (n <= 0) continue;
+        strcpy(g_cmdline, g_line);
         int na = tokenize(g_line, g_argv, AMAX);
         if (na == 0) continue;
 
@@ -162,9 +166,9 @@ int main(int argc, char** argv) {
         int handled = 0;
         run_builtin(g_argv, &handled);
         if (!handled) {
-            /* Try a kernel command (uname/uptime/ps/ifconfig/df), else exec. */
-            static char kout[2048];
-            long n = sys_kcmd(g_argv[0], kout, sizeof(kout));
+            /* Try a kernel command (full line, args included), else exec. */
+            static char kout[4096];
+            long n = sys_kcmd(g_cmdline, kout, sizeof(kout));
             if (n > 0) {
                 sys_write(1, kout, (unsigned long)n);
             } else {

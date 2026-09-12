@@ -45,6 +45,7 @@
 #include "drivers/power/rtc.h"
 #include "sched/task.h"
 #include "pty.h"
+#include "kcmd.h"
 #include "serial_log.h"
 #include "user_auth.h"
 #include "mm/paging.h"
@@ -985,6 +986,7 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
     };
 
     auto prompt_print = [&]() {
+        if (terminal_is_capturing()) return;
         refresh_status_line();
         terminal_set_cursor(prompt_row, 0);
         uint8_t old = terminal_getcolor();
@@ -4665,6 +4667,23 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
     uint32_t last_status_ms = last_timer_ms;
     while (1) {
         nic_process_packets();
+
+        /* Отложенная команда ядра от user-space (SYS_KCMD / SSH):
+           выполняем тем же обработчиком, вывод захватываем в буфер. */
+        {
+            char kc[256];
+            if (kernel_kcmd_take(kc, sizeof(kc))) {
+                terminal_capture_begin(kernel_kcmd_resp(), kernel_kcmd_resp_cap());
+                process_command(kc, strlen(kc));
+                size_t rl = terminal_capture_end();
+                kernel_kcmd_reply(rl);
+                /* Восстановить приглашение (захваченный вывод не рисовался). */
+                prompt_row = terminal_get_row();
+                line_len = 0;
+                cur_pos = 0;
+                prompt_print();
+            }
+        }
 
         uint32_t now_ms = timer_ms();
         if (now_ms - last_timer_ms >= 10) {
