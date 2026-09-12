@@ -12,6 +12,10 @@ void terminal_init_graphics(uint32_t multiboot_info);
 
 void terminal_setcolor(uint8_t color);
 void terminal_putchar(char c);
+/* Захват вывода в буфер (для SYS_KCMD). end() возвращает длину. */
+void   terminal_capture_begin(char* buf, size_t cap);
+size_t terminal_capture_end(void);
+int    terminal_is_capturing(void);
 void terminal_write(const char* data, size_t size);
 void terminal_writestring(const char* data);
 void terminal_set_cursor(size_t row, size_t col);
