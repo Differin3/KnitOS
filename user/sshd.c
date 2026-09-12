@@ -120,6 +120,7 @@ static uint32_t g_pending_len;
 static int g_has_pending;
 static char g_user[64];
 static uint16_t g_shell_uid;
+static uint16_t g_shell_gid;
 
 /* chacha20-poly1305@openssh.com */
 /* OpenSSH chacha uses a 64-bit counter + 64-bit nonce; mapped onto the
@@ -411,6 +412,39 @@ static int auth_failure(void) {
     return ssh_send(f, b.len);
 }
 
+/* uid/gid пользователя из /etc/passwd (для setuid/setgid и приглашения). */
+static int lookup_user(const char* name, int* uid_out, int* gid_out) {
+    int fd = (int)sys_open("/etc/passwd", O_RDONLY, 0);
+    if (fd < 0) return -1;
+    static char pbuf[2048];
+    long n = sys_read(fd, pbuf, sizeof(pbuf) - 1);
+    sys_close(fd);
+    if (n <= 0) return -1;
+    pbuf[n] = 0;
+    char* p = pbuf;
+    while (*p) {
+        char* line = p;
+        while (*p && *p != '\n') p++;
+        if (*p == '\n') { *p = 0; p++; }
+        char* c1 = strchr(line, ':');
+        if (!c1) continue;
+        *c1 = 0;
+        if (strcmp(line, name) != 0) continue;
+        char* c2 = strchr(c1 + 1, ':');
+        if (!c2) continue;
+        *c2 = 0;
+        char* c3 = strchr(c2 + 1, ':');
+        if (!c3) continue;
+        *c3 = 0;
+        int uid = 0, gid = 0;
+        for (char* q = c2 + 1; *q; q++) uid = uid * 10 + (*q - '0');
+        for (char* q = c3 + 1; *q && *q != ':'; q++) gid = gid * 10 + (*q - '0');
+        *uid_out = uid; *gid_out = gid;
+        return 0;
+    }
+    return -1;
+}
+
 static int do_userauth(void) {
     static uint8_t pkt[2048];
     uint32_t plen;
@@ -432,7 +466,16 @@ static int do_userauth(void) {
         uint32_t ul = un < sizeof(g_user) - 1 ? un : (uint32_t)sizeof(g_user) - 1;
         memcpy(g_user, user, ul);
         g_user[ul] = 0;
-        g_shell_uid = (ul == 4 && memcmp(g_user, "root", 4) == 0) ? 0 : 1000;
+        {
+            int u = 0, g = 0;
+            if (lookup_user(g_user, &u, &g) == 0) {
+                g_shell_uid = (uint16_t)u;
+                g_shell_gid = (uint16_t)g;
+            } else {
+                g_shell_uid = (ul == 4 && memcmp(g_user, "root", 4) == 0) ? 0 : 1000;
+                g_shell_gid = g_shell_uid;
+            }
+        }
         uint32_t sn = br_u32(&ur); br_raw(&ur, sn); /* service */
         uint32_t mn = br_u32(&ur);
         const uint8_t* method = br_raw(&ur, mn);
@@ -485,7 +528,10 @@ static int run_session(const char* initial_cmd) {
         sys_dup2(slave, 2);
         if (slave > 2) sys_close(slave);
         if (master > 2) sys_close(master);
-        if (g_shell_uid != 0) sys_setuid(g_shell_uid);
+        if (g_shell_uid != 0) {
+            sys_setgid(g_shell_gid);
+            sys_setuid(g_shell_uid);
+        }
         sys_chdir(g_shell_uid == 0 ? "/root" : "/");
         char* av[4];
         av[0] = (char*)"/tmp/sh.elf";

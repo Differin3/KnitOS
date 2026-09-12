@@ -37,6 +37,8 @@ static int tokenize(char* s, char** argv, int max) {
     return n;
 }
 
+static void get_username(int uid, char* out, int cap);
+
 static void run_exec(char** argv) {
     char path[160];
     if (strchr(argv[0], '/')) {
@@ -69,7 +71,13 @@ static void run_builtin(char** argv, int* handled) {
         }
         putchar('\n');
     } else if (!strcmp(argv[0], "id")) {
-        printf("uid=%d gid=%d\n", (int)sys_getuid(), (int)sys_getgid());
+        char u[32];
+        get_username((int)sys_getuid(), u, sizeof(u));
+        printf("uid=%d(%s) gid=%d\n", (int)sys_getuid(), u, (int)sys_getgid());
+    } else if (!strcmp(argv[0], "whoami")) {
+        char u[32];
+        get_username((int)sys_getuid(), u, sizeof(u));
+        printf("%s\n", u);
     } else if (!strcmp(argv[0], "ls")) {
         char cwdbuf[128];
         const char* d = argv[1];
@@ -106,7 +114,7 @@ static void run_builtin(char** argv, int* handled) {
         if (!argv[1]) { printf("rm: usage: rm <file>\n"); return; }
         if (sys_unlink(argv[1]) < 0) printf("rm: %s: failed\n", argv[1]);
     } else if (!strcmp(argv[0], "help")) {
-        printf("builtins: cd pwd ls cat touch rm echo id exit help\n");
+        printf("builtins: cd pwd ls cat touch rm echo id whoami exit help\n");
         printf("kernel cmds: uname uptime ps ifconfig df\n");
         printf("all other kernel console commands also work\n");
         printf("(ping, traceroute, netstat, ports, date, version, find, ...)\n");
@@ -142,6 +150,42 @@ static void hist_add(const char* s) {
 }
 
 static void emit(const char* s) { sys_write(1, s, (unsigned long)strlen(s)); }
+
+/* Имя пользователя по uid из /etc/passwd (как в Linux). */
+static void get_username(int uid, char* out, int cap) {
+    const char* def = (uid == 0) ? "root" : "user";
+    int fd = (int)sys_open("/etc/passwd", O_RDONLY, 0);
+    if (fd < 0) goto fallback;
+    {
+        static char pbuf[2048];
+        long n = sys_read(fd, pbuf, sizeof(pbuf) - 1);
+        sys_close(fd);
+        if (n <= 0) goto fallback;
+        pbuf[n] = 0;
+        char* p = pbuf;
+        while (*p) {
+            char* line = p;
+            while (*p && *p != '\n') p++;
+            if (*p == '\n') { *p = 0; p++; }
+            char* c1 = strchr(line, ':');
+            if (!c1) continue;
+            *c1 = 0;
+            char* c2 = strchr(c1 + 1, ':');
+            if (!c2) continue;
+            int u = 0;
+            for (char* q = c2 + 1; *q && *q != ':'; q++) u = u * 10 + (*q - '0');
+            if (u == uid) {
+                int i = 0;
+                while (line[i] && i < cap - 1) { out[i] = line[i]; i++; }
+                out[i] = 0;
+                return;
+            }
+        }
+    }
+fallback:
+    strncpy(out, def, cap - 1);
+    out[cap - 1] = 0;
+}
 
 static void redraw(const char* prompt, const char* buf, int len, int pos) {
     emit("\r");
@@ -220,9 +264,9 @@ static void complete(char* buf, int* lenp, int* posp, int cap, const char* promp
             redraw(prompt, buf, len, pos);
         }
     } else if (nmatch > 1) {
-        emit("\r\n");
+        emit("\n");
         for (int i = 0; i < nmatch; i++) { emit(matches[i]); emit("  "); }
-        emit("\r\n");
+        emit("\n");
         redraw(prompt, buf, len, pos);
     }
     *lenp = len; *posp = pos;
@@ -238,7 +282,7 @@ static int read_line_edited(char* buf, int cap, const char* prompt) {
         long r = sys_read(0, &c, 1);
         if (r < 0) return -1;
         if (r == 0) { emit("\n"); return -2; }
-        if (c == '\r' || c == '\n') { emit("\r\n"); buf[len] = 0; return len; }
+        if (c == '\r' || c == '\n') { emit("\n"); buf[len] = 0; return len; }
 
         if (c == 0x7f || c == 0x08) {
             if (pos > 0) {
@@ -289,7 +333,7 @@ static int read_line_edited(char* buf, int cap, const char* prompt) {
             }
             continue;
         }
-        if (c == 0x03) { emit("^C\r\n"); len = pos = 0; buf[0] = 0; emit(prompt); continue; }
+        if (c == 0x03) { emit("^C\n"); len = pos = 0; buf[0] = 0; emit(prompt); continue; }
         if (c == 0x04) {
             if (len == 0) { emit("\n"); return -2; }
             if (pos < len) {
@@ -385,7 +429,8 @@ int main(int argc, char** argv) {
     for (;;) {
         char cwd[128];
         if (sys_getcwd(cwd, sizeof(cwd)) < 0) cwd[0] = 0;
-        const char* who = sys_getuid() == 0 ? "root" : "user";
+        char who[32];
+        get_username((int)sys_getuid(), who, sizeof(who));
         const char* sig = sys_getuid() == 0 ? "#" : "$";
         char prompt[160];
         strcpy(prompt, who);
