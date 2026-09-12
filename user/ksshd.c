@@ -98,11 +98,9 @@ static int handshake(int c) {
 
 static void serve(int c) {
     if (handshake(c) < 0) {
-        printf("ksshd: handshake failed\n");
         sys_sock_close(c);
         return;
     }
-    printf("ksshd: session established\n");
 
     int pfd[2];
     if (sys_pty_open(pfd) < 0) { sys_sock_close(c); return; }
@@ -154,21 +152,19 @@ static void serve(int c) {
     sys_waitpid((int)relay, &st);
     sys_waitpid((int)sh, &st);
     sys_close(master);
-    printf("ksshd: session closed\n");
 }
 
 int main(int argc, char** argv) {
     (void)argc;
     (void)argv;
     int lfd = (int)sys_socket(AF_INET, SOCK_STREAM, 0);
-    if (lfd < 0) { printf("ksshd: socket failed\n"); return 1; }
+    if (lfd < 0) return 1;
     struct sockaddr_in addr;
     addr.sin_family = AF_INET;
     addr.sin_port = KSSH_PORT;
     addr.sin_addr = 0;
-    if (sys_bind(lfd, &addr) < 0) { printf("ksshd: bind failed\n"); return 1; }
-    if (sys_listen(lfd, 4) < 0) { printf("ksshd: listen failed\n"); return 1; }
-    printf("ksshd: listening on port %d\n", KSSH_PORT);
+    if (sys_bind(lfd, &addr) < 0) return 1;
+    if (sys_listen(lfd, 4) < 0) return 1;
     for (;;) {
         int c = (int)sys_accept(lfd, 10000);
         if (c < 0) continue;
