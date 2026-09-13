@@ -40,6 +40,11 @@ void paging_free_pde_frame(uint32_t cr3, uint32_t pde_index);
 void paging_unmap_pde(uint32_t cr3, uint32_t pde_index);
 int paging_pde_present(uint32_t cr3, uint32_t pde_index);
 
+/* Статистика памяти для мониторинга ресурсов (любой указатель может быть NULL). */
+void paging_get_stats(uint32_t* asdir_used, uint32_t* asdir_max,
+                      uint32_t* frames_used, uint32_t* frames_total,
+                      uint32_t* pf_count);
+
 /* Identity-map smoke + intentional #PF recovery. Returns 0 on success. */
 int paging_autotest(void);
 

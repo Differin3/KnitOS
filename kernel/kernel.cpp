@@ -485,6 +485,7 @@ static void boot_populate_user_bins(void) {
     extern char user_ksshd_start[], user_ksshd_end[];
     extern char user_sshd_start[], user_sshd_end[];
     extern char user_httpd_start[], user_httpd_end[];
+    extern char user_ftop_start[], user_ftop_end[];
     static const struct {
         const char* path;
         char* start;
@@ -500,6 +501,7 @@ static void boot_populate_user_bins(void) {
         { "/tmp/ksshd.elf",     user_ksshd_start,   user_ksshd_end },
         { "/tmp/sshd.elf",      user_sshd_start,    user_sshd_end },
         { "/tmp/httpd.elf",     user_httpd_start,   user_httpd_end },
+        { "/tmp/ftop.elf",      user_ftop_start,    user_ftop_end },
     };
     for (unsigned i = 0; i < sizeof(bins) / sizeof(bins[0]); i++) {
         size_t sz = (size_t)(bins[i].end - bins[i].start);
@@ -2455,6 +2457,7 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
             extern char user_httpd_start[], user_httpd_end[];
             extern char user_ksshd_start[], user_ksshd_end[];
             extern char user_sshd_start[], user_sshd_end[];
+            extern char user_ftop_start[], user_ftop_end[];
             const char* arg = cmd + 7;
             const char* which = 0;
             char* start = 0;
@@ -2485,9 +2488,12 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
             } else if (alen >= 4 && arg[0]=='s'&&arg[1]=='s'&&arg[2]=='h'&&arg[3]=='d') {
                 which = "sshd";
                 start = user_sshd_start; end = user_sshd_end; name = "sshd";
+            } else if (alen >= 4 && arg[0]=='f'&&arg[1]=='t'&&arg[2]=='o'&&arg[3]=='p') {
+                which = "ftop";
+                start = user_ftop_start; end = user_ftop_end; name = "ftop";
             }
             if (!which) {
-                terminal_writestring("\nUsage: runelf hello|demo2|demo3|launcher|argtest|httpd|ksshd|sshd");
+                terminal_writestring("\nUsage: runelf hello|demo2|demo3|launcher|argtest|httpd|ksshd|sshd|ftop");
                 flush_line(); return;
             }
             size_t sz = (size_t)(end - start);

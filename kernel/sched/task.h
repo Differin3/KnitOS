@@ -52,6 +52,7 @@ struct task {
     void* arg;
     char name[TASK_NAME_MAX];
     uint32_t runs;
+    uint32_t cpu_ticks;   /* тики планировщика, проведённые RUNNING (100 Гц) */
     uint32_t wake_ms;
     enum task_wait_reason wait_reason;
     bool is_idle;

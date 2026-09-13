@@ -60,6 +60,47 @@
 #define SYS_CRYPTO      49
 #define SYS_KCMD        50
 #define SYS_PTY_RAW     51
+#define SYS_SYSINFO     52
+#define SYS_TASK_LIST   53
+
+/* ---- мониторинг ресурсов (ftop) ---- */
+struct sysinfo_s {
+    uint32_t uptime_ms;
+    uint32_t task_count;
+    uint32_t current_pid;
+    uint32_t heap_total;
+    uint32_t heap_used;
+    uint32_t heap_free;
+    uint32_t asdir_used;
+    uint32_t asdir_max;
+    uint32_t frames_used;
+    uint32_t frames_total;
+    uint32_t pf_count;
+    uint32_t disk_total;
+    uint32_t disk_used;
+    uint32_t disk_free;
+    uint32_t net_rx_packets;
+    uint32_t net_tx_packets;
+    uint32_t net_rx_bytes;
+    uint32_t net_tx_bytes;
+    uint32_t net_rx_dropped;
+    uint32_t net_tx_errors;
+    uint32_t cpu_ticks;      /* всего тиков планировщика */
+    uint32_t idle_ticks;     /* из них idle */
+};
+
+#define TASKINFO_NAME_MAX 16
+struct taskinfo_s {
+    int32_t  pid;
+    int32_t  ppid;
+    uint32_t state;       /* enum task_state */
+    uint32_t uid;
+    uint32_t gid;
+    uint32_t is_user;
+    uint32_t runs;
+    uint32_t cpu_ticks;
+    char     name[TASKINFO_NAME_MAX];
+};
 
 /* Крипто-операции (SYS_CRYPTO). */
 struct kcrypto_req {

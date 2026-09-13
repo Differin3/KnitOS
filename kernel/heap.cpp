@@ -107,3 +107,19 @@ extern "C" void* realloc(void* ptr, size_t size) {
     free(ptr);
     return n;
 }
+
+/* Статистика кучи для мониторинга ресурсов (ftop): обходим freelist. */
+extern "C" void heap_get_stats(uint32_t* total, uint32_t* used, uint32_t* free_bytes) {
+    heap_init();
+    uint32_t free_total = 0;
+    heap_block* cur = heap_head;
+    int guard = 0;
+    while (cur) {
+        if (++guard > 100000) break; /* повреждённый freelist */
+        if (cur->free) free_total += (uint32_t)cur->size + (uint32_t)sizeof(heap_block);
+        cur = cur->next;
+    }
+    if (total) *total = HEAP_SIZE;
+    if (free_bytes) *free_bytes = free_total;
+    if (used) *used = (free_total <= HEAP_SIZE) ? (HEAP_SIZE - free_total) : 0;
+}

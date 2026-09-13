@@ -376,6 +376,7 @@ static void task_slot_clear(struct task* t) {
     t->arg = 0;
     t->name[0] = 0;
     t->runs = 0;
+    t->cpu_ticks = 0;
     t->wake_ms = 0;
     t->wait_reason = WAIT_NONE;
     t->is_idle = false;
@@ -993,6 +994,7 @@ void sched_yield(void) {
 
 void sched_on_tick(void) {
     if (!g_sched_ready) return;
+    if (g_current && g_current->state == TASK_RUNNING) g_current->cpu_ticks++;
     sched_wake_sleepers();
     if (g_slice_left > 0) g_slice_left--;
     if (g_slice_left == 0) {

@@ -360,6 +360,20 @@ int paging_pde_present(uint32_t cr3, uint32_t pde_index) {
     return (dir[pde_index] & PDE_PRESENT) ? 1 : 0;
 }
 
+/* Статистика памяти для мониторинга (ftop). */
+void paging_get_stats(uint32_t* asdir_used, uint32_t* asdir_max,
+                      uint32_t* frames_used, uint32_t* frames_total,
+                      uint32_t* pf_count) {
+    uint32_t a = 0, f = 0;
+    for (int i = 0; i < PAGING_ASDIR_MAX; i++) if (g_asdir_used[i]) a++;
+    for (uint32_t i = 0; i < FORK_FRAME_COUNT; i++) if (g_fork_frames[i]) f++;
+    if (asdir_used) *asdir_used = a;
+    if (asdir_max) *asdir_max = PAGING_ASDIR_MAX;
+    if (frames_used) *frames_used = f;
+    if (frames_total) *frames_total = FORK_FRAME_COUNT;
+    if (pf_count) *pf_count = g_pf_count;
+}
+
 extern "C" void page_fault_handler_main(uint32_t error_code) {
     uint32_t fault_addr;
     asm volatile ("mov %%cr2, %0" : "=r"(fault_addr));

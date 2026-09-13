@@ -31,6 +31,9 @@ global user_ksshd_size
 global user_sshd_start
 global user_sshd_end
 global user_sshd_size
+global user_ftop_start
+global user_ftop_end
+global user_ftop_size
 
 user_demo_start:
     incbin "user/hello.elf"
@@ -91,3 +94,9 @@ user_sshd_start:
 user_sshd_end:
 user_sshd_size:
     dd user_sshd_end - user_sshd_start
+
+user_ftop_start:
+    incbin "user/ftop.elf"
+user_ftop_end:
+user_ftop_size:
+    dd user_ftop_end - user_ftop_start

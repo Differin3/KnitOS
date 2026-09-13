@@ -10,6 +10,8 @@
 #include "drivers/input/keyboard.h"
 #include "sched/task.h"
 #include "mm/paging.h"
+#include "drivers/timer/pit.h"
+#include "drivers/network/core/netif.h"
 #include "pipe.h"
 #include "pty.h"
 #include "crypto/sha256.h"
@@ -90,6 +92,32 @@ static void* sys_buf_alloc(uint32_t n, void* stackbuf, uint32_t stacksz, int* he
     void* p = malloc(n);
     if (p) *heap_used = 1;
     return p;
+}
+
+/* ---- мониторинг ресурсов (ftop) ---- */
+static void sysinfo_idle_cb(const struct task* t, void* ud) {
+    if (t->is_idle) *(uint32_t*)ud += t->cpu_ticks;
+}
+
+struct tasklist_ctx {
+    struct taskinfo_s* out;
+    uint32_t n;
+    uint32_t max;
+};
+
+static void tasklist_cb(const struct task* t, void* ud) {
+    struct tasklist_ctx* c = (struct tasklist_ctx*)ud;
+    if (c->n >= c->max) return;
+    struct taskinfo_s* ti = &c->out[c->n++];
+    ti->pid = t->id;
+    ti->ppid = t->parent_pid;
+    ti->state = (uint32_t)t->state;
+    ti->uid = t->uid;
+    ti->gid = t->gid;
+    ti->is_user = t->is_user ? 1u : 0u;
+    ti->runs = t->runs;
+    ti->cpu_ticks = t->cpu_ticks;
+    for (int i = 0; i < TASKINFO_NAME_MAX; i++) ti->name[i] = t->name[i];
 }
 
 extern "C" int syscall_handler(struct syscall_args* args, uint32_t caller_cs) {
@@ -655,6 +683,53 @@ extern "C" int syscall_handler(struct syscall_args* args, uint32_t caller_cs) {
         case SYS_RING3_DONE:
             paging_ring3_finish();
             return 0;
+        case SYS_SYSINFO: {
+            struct sysinfo_s* out = (struct sysinfo_s*)args->arg1;
+            if (!out) return -1;
+            static struct sysinfo_s info;
+            for (size_t i = 0; i < sizeof(info); i++) ((uint8_t*)&info)[i] = 0;
+            info.uptime_ms = timer_ms();
+            info.task_count = (uint32_t)sched_task_count();
+            info.current_pid = (uint32_t)sched_current_id();
+            heap_get_stats(&info.heap_total, &info.heap_used, &info.heap_free);
+            paging_get_stats(&info.asdir_used, &info.asdir_max,
+                             &info.frames_used, &info.frames_total, &info.pf_count);
+            uint32_t dt = 0, du = 0, df = 0;
+            if (fs_get_disk_usage(&dt, &du, &df) == 0) {
+                info.disk_total = dt;
+                info.disk_used = du;
+                info.disk_free = df;
+            }
+            struct netif* nif = netif_default();
+            if (nif) {
+                info.net_rx_packets = nif->stats.rx_packets;
+                info.net_tx_packets = nif->stats.tx_packets;
+                info.net_rx_bytes = nif->stats.rx_bytes;
+                info.net_tx_bytes = nif->stats.tx_bytes;
+                info.net_rx_dropped = nif->stats.rx_dropped;
+                info.net_tx_errors = nif->stats.tx_errors;
+            }
+            info.cpu_ticks = timer_jiffies();
+            sched_foreach(sysinfo_idle_cb, &info.idle_ticks);
+            if (user_copy_out(out, &info, sizeof(info), caller_cs, usermax) != 0) return -1;
+            return 0;
+        }
+        case SYS_TASK_LIST: {
+            uint32_t max = args->arg2;
+            if (max == 0) return 0;
+            if (max > TASK_MAX) max = TASK_MAX;
+            static struct taskinfo_s tmp[TASK_MAX];
+            struct tasklist_ctx ctx;
+            ctx.out = tmp;
+            ctx.n = 0;
+            ctx.max = max;
+            sched_foreach(tasklist_cb, &ctx);
+            if (ctx.n == 0) return 0;
+            if (user_copy_out((void*)args->arg1, tmp,
+                              ctx.n * (uint32_t)sizeof(struct taskinfo_s),
+                              caller_cs, usermax) != 0) return -1;
+            return (int)ctx.n;
+        }
         default:
             return -1;
     }

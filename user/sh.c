@@ -116,6 +116,8 @@ static void run_builtin(char** argv, int* handled) {
     } else if (!strcmp(argv[0], "help")) {
         printf("builtins: cd pwd ls cat touch rm echo id whoami exit help\n");
         printf("kernel cmds: uname uptime ps ifconfig df\n");
+        printf("apps: hello demo3 argtest ptytest launcher httpd sh ksshd sshd ftop\n");
+        printf("ftop: resource monitor (ftop [N])\n");
         printf("all other kernel console commands also work\n");
         printf("(ping, traceroute, netstat, ports, date, version, find, ...)\n");
     } else {
@@ -211,7 +213,7 @@ static const char* g_cmds[] = {
     "uname", "uptime", "ps", "ifconfig", "df", "ping", "traceroute", "netstat",
     "ports", "date", "version", "whoami", "users", "groups", "find", "log",
     "arp", "route", "httpget", "dhcp", "dns",
-    "hello", "demo3", "argtest", "ptytest", "launcher", "httpd", "sh", "ksshd", "sshd",
+    "hello", "demo3", "argtest", "ptytest", "launcher", "httpd", "sh", "ksshd", "sshd", "ftop",
     0
 };
 
