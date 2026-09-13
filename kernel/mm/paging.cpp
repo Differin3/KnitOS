@@ -276,6 +276,27 @@ uint32_t paging_clone_dir_deep(uint32_t src_cr3) {
     return dst_cr3;
 }
 
+/* Приватизировать user-PDE: скопировать текущее (identity) содержимое
+   4MB-страницы в отдельный физический кадр и направить PDE на него. */
+int paging_privatize_user_pde(uint32_t cr3, uint32_t pde_index) {
+    uint32_t* dir = paging_dir_ptr(cr3);
+    if (!dir || pde_index >= PAGE_DIR_ENTRIES) return -1;
+    uint32_t e = dir[pde_index];
+    if (!(e & PDE_PRESENT) || !(e & PDE_PSE)) return -1;
+    /* Если PDE уже указывает в пул fork-кадров — уже приватный. */
+    if (e & 0xFFC00000u) {
+        uint32_t cur = e & 0xFFC00000u;
+        if (cur >= FORK_FRAME_BASE && cur < FORK_FRAME_END) return 0;
+    }
+    uint32_t phys = fork_frame_alloc();
+    if (!phys) return -1;
+    const uint8_t* s = (const uint8_t*)(pde_index << 22);
+    uint8_t* d = (uint8_t*)phys;
+    for (uint32_t k = 0; k < FORK_FRAME_SIZE; k++) d[k] = s[k];
+    dir[pde_index] = phys | (e & 0xFFFu) | PDE_USER;
+    return 0;
+}
+
 void paging_free_dir(uint32_t cr3) {
     if (!cr3 || cr3 == g_kernel_cr3) return;
     uint32_t* dir = paging_dir_ptr(cr3);
