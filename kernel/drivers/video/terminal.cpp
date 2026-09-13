@@ -76,25 +76,14 @@ static void recompute_layout(void) {
     else content_rows = term_rows > 0 ? 1 : 0;
 }
 
-static void vga_hw_cursor(size_t row, size_t col) {
-    if (use_fb) return;
-    if (row >= 25) row = 24;
-    if (col >= 80) col = 79;
-    uint16_t pos = (uint16_t)(row * 80 + col);
-    outb(0x3D4, 0x0F);
-    outb(0x3D5, (uint8_t)(pos & 0xFF));
-    outb(0x3D4, 0x0E);
-    outb(0x3D5, (uint8_t)((pos >> 8) & 0xFF));
-}
-
-/* Аппаратный курсор VGA — тонкая подчёркнутая полоска (сканлайны 14-15),
-   чтобы не перекрывать символ. */
+/* Курсор консоли отключён: аппаратный курсор VGA прячем (start scanline 0x20
+   выставляет бит 5 — курсор невидим). */
 static void vga_cursor_underline(void) {
     if (use_fb) return;
     outb(0x3D4, 0x0A);
-    outb(0x3D5, 0x0E);  /* start scanline = 14 */
+    outb(0x3D5, 0x20);
     outb(0x3D4, 0x0B);
-    outb(0x3D5, 0x0F);  /* end scanline = 15 */
+    outb(0x3D5, 0x00);
 }
 
 static void backend_draw_cell(size_t row, size_t col, uint16_t entry) {
@@ -125,14 +114,6 @@ static void set_cell(size_t row, size_t col, char c, uint8_t color) {
     paint_cell(row, col);
 }
 
-/* Программный мигающий курсор: тонкая подчёркнутая полоска.
-   В FB — линия по низу ячейки; в VGA text — инверсия цветов символа.
-   cells[][] НЕ трогаем — там истинный контент; при восстановлении перерисовываем из него. */
-static bool   g_cursor_on     = true;
-static bool   g_cursor_painted = false;
-static size_t g_cursor_prow   = 0;
-static size_t g_cursor_pcol   = 0;
-
 /* Захват вывода терминала (для SYS_KCMD — выполнение команд ядра из
    user-space и возврат вывода по SSH). */
 static char*  g_cap_buf    = 0;
@@ -153,22 +134,7 @@ size_t terminal_capture_end(void) {
 }
 int terminal_is_capturing(void) { return g_cap_active; }
 
-static void term_draw_cursor_at(size_t row, size_t col) {
-    if (row >= term_rows || col >= term_cols) return;
-    if (use_fb) {
-        fb_draw_cursor_line(col, row);
-    } else {
-        /* VGA text mode: используем только аппаратный курсор (underline),
-           чтобы не было артефактов от двойного курсора. */
-    }
-}
-
-static void term_restore_cursor_cell(void) {
-    if (!g_cursor_painted) return;
-    if (g_cursor_prow >= term_rows || g_cursor_pcol >= term_cols) return;
-    /* В VGA курсор аппаратный — восстанавливать ячейку не нужно. */
-}
-
+/* Курсор консоли удалён — ничего не рисуем. */
 static void terminal_update_cursor() {
     size_t min_r = editor_mode ? 0 : content_origin;
     size_t max_r = editor_mode ? term_rows : (content_origin + content_rows);
@@ -176,26 +142,11 @@ static void terminal_update_cursor() {
     if (terminal_row < min_r) terminal_row = min_r;
     if (terminal_row >= max_r) terminal_row = max_r - 1;
     if (terminal_column >= term_cols) terminal_column = term_cols > 0 ? term_cols - 1 : 0;
-    term_restore_cursor_cell();
-    g_cursor_prow = terminal_row;
-    g_cursor_pcol = terminal_column;
-    g_cursor_painted = true;
-    term_draw_cursor_at(g_cursor_prow, g_cursor_pcol);
-    vga_hw_cursor(terminal_row, terminal_column);
 }
 
-/* Тик мигания: вызывать периодически (из главного цикла). */
+/* Тик мигания: вызывать периодически (из главного цикла). Курсора нет. */
 void terminal_cursor_tick(uint32_t now_ms) {
-    static uint32_t last_ms = 0;
-    if ((uint32_t)(now_ms - last_ms) < 450u) return;
-    last_ms = now_ms;
-    g_cursor_on = !g_cursor_on;
-    if (!g_cursor_painted) return;
-    if (g_cursor_on) {
-        term_draw_cursor_at(g_cursor_prow, g_cursor_pcol);
-    } else {
-        term_restore_cursor_cell();
-    }
+    (void)now_ms;
 }
 
 static void history_push_row_cells(size_t row) {
