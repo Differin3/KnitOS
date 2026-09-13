@@ -297,6 +297,20 @@ int paging_privatize_user_pde(uint32_t cr3, uint32_t pde_index) {
     return 0;
 }
 
+void paging_free_pde_frame(uint32_t cr3, uint32_t pde_index) {
+    uint32_t* dir = paging_dir_ptr(cr3);
+    if (!dir || pde_index >= PAGE_DIR_ENTRIES) return;
+    uint32_t e = dir[pde_index];
+    if ((e & PDE_PRESENT) && (e & PDE_PSE)) {
+        uint32_t phys = e & 0xFFC00000u;
+        if (phys >= FORK_FRAME_BASE && phys < FORK_FRAME_END) {
+            fork_frame_free(phys);
+        }
+    }
+    /* Вернуть PDE к identity-отображению ядра (supervisor). */
+    dir[pde_index] = g_page_dir[pde_index] & ~(uint32_t)PDE_USER;
+}
+
 void paging_free_dir(uint32_t cr3) {
     if (!cr3 || cr3 == g_kernel_cr3) return;
     uint32_t* dir = paging_dir_ptr(cr3);

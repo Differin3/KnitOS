@@ -32,6 +32,10 @@ void paging_clear_user_pde(uint32_t cr3, uint32_t pde_index);
    по адресу 0x800000. Возвращает 0 при успехе. */
 int paging_privatize_user_pde(uint32_t cr3, uint32_t pde_index);
 
+/* Освободить приватный кадр, на который указывает PDE, и вернуть PDE к
+   identity-отображению ядра (используется при exec для старого стека). */
+void paging_free_pde_frame(uint32_t cr3, uint32_t pde_index);
+
 /* Test helpers: unmap/remap one 4MB PDE in a given dir (not kernel dir preferred). */
 void paging_unmap_pde(uint32_t cr3, uint32_t pde_index);
 int paging_pde_present(uint32_t cr3, uint32_t pde_index);

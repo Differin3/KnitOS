@@ -262,16 +262,15 @@ int task_exec_user_argv(const char* path, int argc, const char* const* argv) {
     }
     free(elf);
 
-    /* Снимаем старый user-доступ во всей области ELF, затем включаем
-       только под новый образ и новый стек. Освобождаем физические кадры
-       старых PDE (иначе при каждом exec утекает fork-пул). */
-    paging_free_user_frames(t->cr3);
-    for (uint32_t va = ELF_USER_VA_MIN; va < ELF_USER_VA_MAX; va += USER_STACK_SLOT_STEP) {
-        paging_clear_user_pde(t->cr3, va >> 22);
-    }
+    /* Приватная модель: 0x800000 — уже приватный кадр этой задачи, и
+       elf32_load перезаписал его новым образом (не освобождаем!).
+       Помечаем сегменты нового образа user, освобождаем только старый
+       стек-кадр и берём новый. */
     for (uint32_t va = lo & ~(USER_STACK_SLOT_STEP - 1u); va < hi; va += USER_STACK_SLOT_STEP) {
         paging_mark_user_pde(t->cr3, va >> 22);
-        paging_privatize_user_pde(t->cr3, va >> 22);
+    }
+    if (t->user_stack) {
+        paging_free_pde_frame(t->cr3, (t->user_stack - USER_STACK_SLOT_STEP) >> 22);
     }
     uint32_t nstack = user_stack_alloc();
     paging_mark_user_pde(t->cr3, (nstack - USER_STACK_SLOT_STEP) >> 22);
