@@ -30,6 +30,9 @@ static uint32_t g_wake_count = 0;
 static uint32_t g_net_wake_count = 0;
 static uint16_t g_kill_net_port = 39201;
 
+static void user_stack_slot_release(int idx);
+static void user_stack_slot_ref(int idx);
+
 static void task_copy_name(char* dst, const char* src) {
     size_t i = 0;
     if (!src) src = "?";
@@ -120,6 +123,10 @@ void task_resources_cleanup(int pid) {
             paging_free_dir(t->cr3);
             t->cr3 = 0;
         }
+        if (t->stack_slot >= 0) {
+            user_stack_slot_release(t->stack_slot);
+            t->stack_slot = -1;
+        }
     }
 }
 
@@ -140,14 +147,54 @@ int task_enable_aspace(int id) {
 
 static struct task* task_alloc_slot(void);
 static void task_setup_stack(struct task* t);
-static uint32_t user_stack_alloc(void);
 static uint32_t user_prepare_args(uint32_t stack_top, int argc, const char* const* argv);
 static void user_task_trampoline(void* arg);
 
-/* Выделение identity-слота стека для user-процесса (4MB страница PSE). */
+/* Выделение identity-слота стека для user-процесса (4MB страница PSE).
+   Слоты нумеруются и учитываются ссылками: два живых процесса никогда не
+   должны получить один и тот же слот, иначе (identity-отображение VA==PA)
+   они начнут затирать стеки друг друга. Раньше слоты просто шли по кругу и
+   на 17-й задаче переиспользовали стек ещё живого сервиса. */
 #define USER_STACK_SLOT_START 0x01000000u
 #define USER_STACK_SLOT_STEP  0x00400000u
+#define USER_STACK_SLOT_COUNT ((ELF_USER_VA_MAX - USER_STACK_SLOT_START) / USER_STACK_SLOT_STEP)
 #define TASK_UID_USER         1000
+
+static uint8_t g_stack_slot_ref[USER_STACK_SLOT_COUNT];
+static uint32_t g_user_stack_next = 0;
+
+static int user_stack_slot_alloc(void) {
+    for (uint32_t i = 0; i < USER_STACK_SLOT_COUNT; i++) {
+        uint32_t idx = (g_user_stack_next + i) % USER_STACK_SLOT_COUNT;
+        if (g_stack_slot_ref[idx] == 0) {
+            g_stack_slot_ref[idx] = 1;
+            g_user_stack_next = (idx + 1) % USER_STACK_SLOT_COUNT;
+            return (int)idx;
+        }
+    }
+    return -1;
+}
+
+static uint32_t user_stack_slot_va(int idx) {
+    return USER_STACK_SLOT_START + (uint32_t)idx * USER_STACK_SLOT_STEP;
+}
+
+static uint32_t user_stack_slot_top(int idx) {
+    return user_stack_slot_va(idx) + USER_STACK_SLOT_STEP;
+}
+
+static uint32_t user_stack_slot_pde(int idx) {
+    return user_stack_slot_va(idx) >> 22;
+}
+
+static void user_stack_slot_ref(int idx) {
+    if (idx >= 0 && idx < (int)USER_STACK_SLOT_COUNT) g_stack_slot_ref[idx]++;
+}
+
+static void user_stack_slot_release(int idx) {
+    if (idx >= 0 && idx < (int)USER_STACK_SLOT_COUNT && g_stack_slot_ref[idx] > 0)
+        g_stack_slot_ref[idx]--;
+}
 
 int task_spawn_user_uid(const uint8_t* elf_img, size_t elf_len, const char* name, uint16_t uid) {
     if (!g_sched_ready || !elf_img || elf_len < 16) return -1;
@@ -180,7 +227,16 @@ int task_spawn_user_uid(const uint8_t* elf_img, size_t elf_len, const char* name
     t->cr3 = dir;
     t->is_user = true;
     t->user_entry = entry;
-    t->user_stack = user_stack_alloc();
+    int slot = user_stack_slot_alloc();
+    if (slot < 0) {
+        paging_free_dir(dir);
+        free(kstack);
+        t->cr3 = 0;
+        t->state = TASK_UNUSED;
+        return -5;
+    }
+    t->stack_slot = slot;
+    t->user_stack = user_stack_slot_top(slot);
     t->kstack_top = (uint32_t)(kstack + TASK_STACK_SIZE);
     t->uid = uid;
     t->gid = uid;
@@ -269,11 +325,15 @@ int task_exec_user_argv(const char* path, int argc, const char* const* argv) {
     for (uint32_t va = lo & ~(USER_STACK_SLOT_STEP - 1u); va < hi; va += USER_STACK_SLOT_STEP) {
         paging_mark_user_pde(t->cr3, va >> 22);
     }
+    int nslot = user_stack_slot_alloc();
+    if (nslot < 0) return -9;   /* все слоты заняты — не портим текущий стек */
     if (t->user_stack) {
         paging_free_pde_frame(t->cr3, (t->user_stack - USER_STACK_SLOT_STEP) >> 22);
     }
-    uint32_t nstack = user_stack_alloc();
-    paging_mark_user_pde(t->cr3, (nstack - USER_STACK_SLOT_STEP) >> 22);
+    user_stack_slot_release(t->stack_slot);
+    t->stack_slot = nslot;
+    uint32_t nstack = user_stack_slot_top(nslot);
+    paging_mark_user_pde(t->cr3, user_stack_slot_pde(nslot));
 
     t->user_entry = entry;
     t->user_stack = nstack;
@@ -325,6 +385,7 @@ static void task_slot_clear(struct task* t) {
     t->cr3 = 0;
     t->is_user = false;
     t->uid = 0;
+    t->stack_slot = -1;
     task_fds_clear(t);
 }
 
@@ -360,16 +421,6 @@ static void user_task_trampoline(void* arg) {
     uint32_t usp = user_prepare_args(t->user_stack, 1, argv0);
     user_mode_enter(t->user_entry, usp);
     task_exit();
-}
-
-/* Выделение identity-слота стека для user-процесса (4MB страница PSE). */
-static uint32_t g_user_stack_next = USER_STACK_SLOT_START;
-
-static uint32_t user_stack_alloc(void) {
-    uint32_t slot = g_user_stack_next;
-    g_user_stack_next += USER_STACK_SLOT_STEP;
-    if (g_user_stack_next >= ELF_USER_VA_MAX) g_user_stack_next = USER_STACK_SLOT_START;
-    return slot + USER_STACK_SLOT_STEP; /* top of the slot */
 }
 
 /* Готовит начальный user-стек: [argc][argv[0]..argv[n-1]][NULL][NULL(envp)][строки].
@@ -454,6 +505,10 @@ int task_fork_user(void) {
     t->is_user = true;
     t->user_entry = user_eip;
     t->user_stack = user_esp;
+    /* Ребёнок делит VA стека с родителем (у него приватная физическая копия
+       от clone_dir_deep), поэтому берём ещё одну ссылку на слот. */
+    t->stack_slot = parent->stack_slot;
+    user_stack_slot_ref(parent->stack_slot);
     t->kstack_top = (uint32_t)(kstack + TASK_STACK_SIZE);
     t->uid = parent->uid;
     t->gid = parent->gid;
@@ -518,6 +573,7 @@ void sched_init(void) {
     for (int i = 0; i < TASK_MAX; i++) {
         g_tasks[i].state = TASK_UNUSED;
         g_tasks[i].stack = 0;
+        g_tasks[i].stack_slot = -1;
         task_fds_clear(&g_tasks[i]);
         g_tasks[i].cwd[0] = '/';
         g_tasks[i].cwd[1] = 0;

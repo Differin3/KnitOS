@@ -62,6 +62,7 @@ struct task {
     bool is_user;         /* ring-3 process (Phase 3+) */
     uint32_t user_entry;  /* ring-3 EIP */
     uint32_t user_stack;  /* ring-3 ESP (top) */
+    int stack_slot;       /* index of the identity stack slot (ref-counted) */
     uint32_t kstack_top;  /* kernel stack top (TSS.esp0) */
     uint16_t uid;         /* user id (0 = root) */
     uint16_t gid;         /* primary group id */
