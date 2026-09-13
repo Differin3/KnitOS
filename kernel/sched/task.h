@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 
-#define TASK_MAX         16
+#define TASK_MAX         32
 #define TASK_STACK_SIZE  8192
 #define TASK_NAME_MAX    16
 #define TASK_SLICE_TICKS 4

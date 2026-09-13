@@ -19,7 +19,7 @@ static int g_paging_on = 0;
 static volatile uint32_t g_pf_count = 0;
 static volatile uint32_t g_ring3_flag = 0;
 
-#define PAGING_ASDIR_MAX 8
+#define PAGING_ASDIR_MAX 16
 static uint32_t g_asdirs[PAGING_ASDIR_MAX][PAGE_DIR_ENTRIES] __attribute__((aligned(4096)));
 static uint8_t g_asdir_used[PAGING_ASDIR_MAX];
 

@@ -11,7 +11,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define SOCKET_MAX 32
+#define SOCKET_MAX 64
 #define UDP_SOCK_QUEUE 8
 #define UDP_PKT_MAX  512
 

@@ -6,7 +6,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 
-#define TCP_MAX_CONNECTIONS 32
+#define TCP_MAX_CONNECTIONS 64
 #define TCP_RX_BUFFER_SIZE 4096
 #define TCP_TX_BUFFER_SIZE 4096
 #define TCP_MAX_RETRANSMIT 5

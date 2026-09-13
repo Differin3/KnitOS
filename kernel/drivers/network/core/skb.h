@@ -6,7 +6,7 @@
 #include <stdbool.h>
 
 #define SKB_DATA_SIZE 2048
-#define SKB_POOL_SIZE 64
+#define SKB_POOL_SIZE 256
 
 struct netif;
 

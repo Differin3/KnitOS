@@ -8,7 +8,7 @@
 #define NET_PROTO_TCP 6
 #define NET_PROTO_UDP 17
 
-#define NET_PORTS_MAX   64
+#define NET_PORTS_MAX   128
 #define NET_OWNER_MAX   24
 
 #define NET_PID_SHELL   1
