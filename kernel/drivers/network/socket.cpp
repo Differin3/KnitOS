@@ -218,7 +218,7 @@ int socket_accept(int fd, int timeout_ms) {
     uint32_t start = timer_ms();
 
     while (timer_ms_since(start) < wait_ms) {
-        socket_service_network();
+        /* RX handled by netpoll task */
         struct tcp_connection* accepted = tcp_connection_accept_pending(s->local_port, s->listen_tcp);
         if (accepted) {
             accepted->pending_accept = false;
@@ -363,7 +363,7 @@ int socket_recv(int fd, void* buf, size_t len, int timeout_ms) {
         int n = (s->type == SOCK_DGRAM) ? socket_udp_try_recv(s, buf, len)
                                         : socket_tcp_try_recv(s, buf, len);
         if (n != 0) return n;
-        socket_service_network();
+        /* RX handled by netpoll task */
         socket_delay();
     }
     return 0;
@@ -435,7 +435,7 @@ int socket_recv_exact(int fd, void* buf, size_t need, int timeout_ms) {
         }
         idle++;
         if (idle >= max_idle) break;
-        socket_service_network();
+        /* RX handled by netpoll task */
     }
     return (got == need) ? 0 : -1;
 }

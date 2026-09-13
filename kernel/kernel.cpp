@@ -29,6 +29,7 @@
 #include "drivers/network/protocols/udp.h"
 #include "drivers/network/network_config.h"
 #include "drivers/network/socket.h"
+#include "drivers/network/core/net_rx.h"
 #include "drivers/network/http_server.h"
 #include "drivers/network/remote_shell.h"
 #include "drivers/network/ftp_server.h"
@@ -844,6 +845,7 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
             boot_advance_row();
         }
         service_init();
+        net_start_poller();
     }
     
     boot_advance_row();

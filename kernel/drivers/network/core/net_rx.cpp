@@ -11,6 +11,7 @@
 #include "../dns/dns.h"
 #include "../dhcp/dhcp.h"
 #include "serial_log.h"
+#include "sched/task.h"
 
 static inline uint16_t ntohs(uint16_t netshort) {
     return (uint16_t)(((netshort & 0xFF) << 8) | ((netshort >> 8) & 0xFF));
@@ -152,4 +153,19 @@ void net_process(void) {
     }
     ip_reassembly_gc();
     busy = 0;
+}
+
+/* Выделенная задача-поллер: единственный, кто вызывает net_process() в
+   штатном режиме. Раньше RX дёргался из user accept-циклов нескольких
+   сервисов, что приводило к голоданию/порче при конкурентных слушателях. */
+static void net_poll_task(void* arg) {
+    (void)arg;
+    for (;;) {
+        net_process();
+        task_sleep_ms(1);
+    }
+}
+
+void net_start_poller(void) {
+    task_create(net_poll_task, 0, "netpoll");
 }
