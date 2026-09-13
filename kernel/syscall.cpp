@@ -8,6 +8,7 @@
 #include "drivers/network/socket.h"
 #include "drivers/video/terminal.h"
 #include "drivers/input/keyboard.h"
+#include "serial_log.h"
 #include "sched/task.h"
 #include "mm/paging.h"
 #include "drivers/timer/pit.h"
@@ -175,13 +176,14 @@ extern "C" int syscall_handler(struct syscall_args* args, uint32_t caller_cs) {
                     return -1;
                 return r;
             }
-            /* Не занятое файлом fd 0-2 — консоль (stdin: клавиатура). */
+            /* Не занятое файлом fd 0-2 — консоль (stdin: клавиатура + serial). */
             if (fd >= 0 && fd <= 2) {
                 char kb[128];
-                uint32_t n = ulen < sizeof(kb) ? (uint32_t)ulen : (uint32_t)sizeof(kb);
+                uint32_t n = ulen < sizeof(kb) ? ulen : sizeof(kb);
                 uint32_t i = 0;
                 for (; i < n; i++) {
                     char c = keyboard_getchar();
+                    if (c == 0) c = serial_poll_char();
                     if (c == 0) break;
                     kb[i] = c;
                 }

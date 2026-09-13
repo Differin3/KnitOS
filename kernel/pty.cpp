@@ -105,8 +105,11 @@ int pty_master_write(int idx, const void* buf, uint32_t n) {
                 pty_echo(p, "\b \b");
             }
         } else if (c == 0x03) {
+            /* Ctrl+C: выставляем сигнал (для kernel-обработчика ptyrun) И
+               отдаём байт 0x03 читателю slave — shell/ftop сами решают, что
+               делать (raw-режим и так пропускает 0x03 как есть). */
             p->sigint = 1;
-            pty_echo(p, "^C\r\n");
+            ring_push(p->in_buf, &p->in_head, &p->in_count, 0x03);
             p->line_len = 0;
         } else if (c == 0x04) {
             /* Ctrl+D: отдать накопленную строку и выставить EOF (без эха). */

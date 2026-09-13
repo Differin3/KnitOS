@@ -1283,6 +1283,7 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
             terminal_writestring("\n  sessions  session <n>  newsession <name>  (independent terminals)");
             terminal_writestring("\n  clear   echo   version   date   setdate YYYY-MM-DD   settime HH:MM:SS");
             terminal_writestring("\n  runelf hello   disk   reboot   shutdown  poweroff");
+            terminal_writestring("\n  ftop                   resource monitor (q to quit)");
             terminal_writestring("\n  ptyrun argtest|ptytest   (interactive program over a PTY)");
             terminal_writestring("\n  acpi                  show ACPI tables info (S5, reset)");
             terminal_writestring("\n  ps                     tasks (systemd=0, idle, ...)");
@@ -2447,6 +2448,31 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
             }
             refresh_status_line();
             flush_line(); return;
+        }
+        /* ftop — монитор ресурсов. Запускаем user-утилиту и ЖДЁМ её: пока она
+           работает, консольный shell не читает клавиатуру, поэтому 'q'/Ctrl+C
+           попадают в ftop и он может выйти. */
+        if (len >= 4 && cmd[0]=='f'&&cmd[1]=='t'&&cmd[2]=='o'&&cmd[3]=='p' &&
+            (len == 4 || cmd[4] == ' ')) {
+            extern char user_ftop_start[], user_ftop_end[];
+            size_t sz = (size_t)(user_ftop_end - user_ftop_start);
+            if (sz == 0) {
+                terminal_writestring("\nNo embedded ftop");
+                flush_line(); return;
+            }
+            int tid = task_spawn_user_uid((const uint8_t*)user_ftop_start, sz, "ftop", 0);
+            if (tid < 0) {
+                terminal_writestring("\nftop: spawn failed");
+                flush_line(); return;
+            }
+            int st = 0;
+            task_wait_child(tid, &st);
+            terminal_clear_viewport();
+            prompt_row = terminal_get_row();
+            line_len = 0;
+            cur_pos = 0;
+            prompt_print();
+            return;
         }
         if (len >= 8 && cmd[0]=='r'&&cmd[1]=='u'&&cmd[2]=='n'&&cmd[3]=='e'&&cmd[4]=='l'&&cmd[5]=='f'&&cmd[6]==' ') {
             extern char user_demo_start[], user_demo_end[];
@@ -4379,6 +4405,7 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
         "login", "logout", "whoami", "id", "users", "useradd", "userdel", "usermod", "groupadd", "groups", "passwd", "su", "chgrp",
         "sessions", "session", "newsession", "systemctl",
         "cat", "nano", "write", "rm", "reboot", "shutdown", "poweroff", "acpi", "resolution", "test",
+        "ftop",
         "network", "ifconfig", "dhcp", "ip", "udp", "tcp", "udplisten", "ping", "traceroute", "tcpdump", "httpget", "httpserver", "rshd", "ftpd", "dns", "arp", "netstat", "ports", "port", "route", "socktest", "cryptotest", "log", "autotest", 0
     };
     static const char* network_subcommands[] = { "static", "save", "reload", 0 };
