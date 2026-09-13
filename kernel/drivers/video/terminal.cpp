@@ -613,6 +613,103 @@ int terminal_read_cell(size_t row, size_t col) {
 void terminal_setcolor(uint8_t color) { terminal_color = color; }
 uint8_t terminal_getcolor() { return terminal_color; }
 
+/* ---- Мини-парсер ANSI CSI: ESC [ <params> <final> ----
+   Поддержка: 2J (очистить экран), J (стереть до конца), K (стереть строку),
+   H/f (позиция 1-based), A/B/C/D (сдвиг курсора), m/прочее — игнор.
+   Нужен, чтобы ftop и другие full-screen утилиты перерисовывались на месте
+   и на консоли ядра, а не только через ANSI-терминал SSH-клиента. */
+static int g_ansi_state = 0;   /* 0=обычный, 1=после ESC, 2=CSI */
+static int g_ansi_priv  = 0;
+static int g_ansi_param[8];
+static int g_ansi_np    = 0;
+static int g_ansi_cur   = -1;  /* -1 = параметра нет */
+
+static size_t ansi_min_row(void) { return editor_mode ? 0 : content_origin; }
+static size_t ansi_max_row(void) {
+    size_t m = editor_mode ? term_rows : (content_origin + content_rows);
+    if (m <= ansi_min_row()) m = ansi_min_row() + 1;
+    return m;
+}
+static void ansi_clear_eol(void) {
+    for (size_t c = terminal_column; c < term_cols; c++)
+        set_cell(terminal_row, c, ' ', terminal_color);
+}
+static void ansi_clear_below(void) {
+    ansi_clear_eol();
+    size_t maxr = ansi_max_row();
+    for (size_t r = terminal_row + 1; r < maxr; r++)
+        for (size_t c = 0; c < term_cols; c++)
+            set_cell(r, c, ' ', terminal_color);
+}
+static int ansi_param(int i, int def) {
+    if (i < g_ansi_np) return g_ansi_param[i];
+    if (i == g_ansi_np && g_ansi_cur >= 0) return g_ansi_cur;
+    return def;
+}
+static void ansi_exec(char final) {
+    size_t minr = ansi_min_row(), maxr = ansi_max_row();
+    switch (final) {
+        case 'J':
+            if (ansi_param(0, 0) == 2) terminal_clear_viewport();
+            else ansi_clear_below();
+            break;
+        case 'K':
+            ansi_clear_eol();
+            break;
+        case 'H': case 'f': {
+            int row = ansi_param(0, 1);
+            int col = ansi_param(1, 1);
+            if (row < 1) row = 1;
+            if (col < 1) col = 1;
+            size_t r = (size_t)(row - 1);
+            size_t c = (size_t)(col - 1);
+            if (r < minr) r = minr;
+            if (r >= maxr) r = maxr - 1;
+            if (c >= term_cols) c = term_cols ? term_cols - 1 : 0;
+            terminal_row = r;
+            terminal_column = c;
+            break;
+        }
+        case 'A': { int n = ansi_param(0, 1); if (n < 1) n = 1;
+                    terminal_row = ((int)terminal_row - n < (int)minr) ? minr : terminal_row - (size_t)n; break; }
+        case 'B': { int n = ansi_param(0, 1); if (n < 1) n = 1;
+                    terminal_row += (size_t)n; if (terminal_row >= maxr) terminal_row = maxr - 1; break; }
+        case 'C': { int n = ansi_param(0, 1); if (n < 1) n = 1;
+                    terminal_column += (size_t)n;
+                    if (terminal_column >= term_cols) terminal_column = term_cols ? term_cols - 1 : 0; break; }
+        case 'D': { int n = ansi_param(0, 1); if (n < 1) n = 1;
+                    terminal_column = ((int)terminal_column - n < 0) ? 0 : terminal_column - (size_t)n; break; }
+        default: break;
+    }
+}
+
+/* Возвращает 1, если c поглощён escape-последовательностью. */
+static int terminal_ansi_feed(char c) {
+    if (g_ansi_state == 0) {
+        if (c == 0x1b) { g_ansi_state = 1; return 1; }
+        return 0;
+    }
+    if (g_ansi_state == 1) {
+        if (c == '[') { g_ansi_state = 2; g_ansi_np = 0; g_ansi_cur = -1; g_ansi_priv = 0; }
+        else g_ansi_state = 0;
+        return 1;
+    }
+    if (c >= '0' && c <= '9') {
+        if (g_ansi_cur < 0) g_ansi_cur = 0;
+        g_ansi_cur = g_ansi_cur * 10 + (c - '0');
+        return 1;
+    }
+    if (c == ';') {
+        if (g_ansi_np < 8) g_ansi_param[g_ansi_np++] = (g_ansi_cur < 0) ? 0 : g_ansi_cur;
+        g_ansi_cur = -1;
+        return 1;
+    }
+    if (c == '?' || c == '>' || c == '=') { g_ansi_priv = 1; return 1; }
+    ansi_exec(c);
+    g_ansi_state = 0;
+    return 1;
+}
+
 void terminal_putchar(char c) {
     /* Режим захвата: вывод уходит в буфер, а не на экран/в serial.
        Используется SYS_KCMD, чтобы выполнить команду ядра и вернуть её
@@ -621,6 +718,8 @@ void terminal_putchar(char c) {
         if (g_cap_buf && g_cap_len + 1 < g_cap_cap) g_cap_buf[g_cap_len++] = c;
         return;
     }
+    /* Escape-последовательности обрабатываем сами и не зеркалим в serial. */
+    if (terminal_ansi_feed(c)) return;
     /* Mirror first so serial progress is not blocked by FB scroll. */
     log_mirror_char(c);
 

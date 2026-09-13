@@ -77,6 +77,7 @@ int main(int argc, char** argv) {
     uint32_t prev_total = 0, prev_idle = 0;
     int iter = 0;
 
+    wr("\x1b[?25l");   /* спрятать курсор терминала, как top */
     for (;;) {
         if (sys_sysinfo(&si) < 0) { puts("ftop: sysinfo failed"); return 1; }
         int n = (int)sys_task_list(tasks, 32);
@@ -89,8 +90,9 @@ int main(int argc, char** argv) {
 
         char b1[24], b2[24];
 
-        /* Заголовок */
-        wr("\n");
+        /* Перерисовка «на месте», как в top: курсор в начало, затираем кадр. */
+        if (iter == 0) wr("\x1b[2J\x1b[H");
+        else wr("\x1b[H");
         wr("ftop - KnitOS resource monitor    (q to quit)\n");
         uint32_t secs = si.uptime_ms / 1000u;
         uint32_t dd = secs / 86400u, hh = (secs / 3600u) % 24u, mm = (secs / 60u) % 60u, ss = secs % 60u;
@@ -157,6 +159,7 @@ int main(int argc, char** argv) {
             wr(tasks[i].name);
             wr("\n");
         }
+        wr("\x1b[J");   /* стереть «хвост» от предыдущего кадра */
 
         /* Сохраняем срез для следующего интервала */
         for (int i = 0; i < n && i < 32; i++) {
@@ -177,5 +180,8 @@ int main(int argc, char** argv) {
         }
         sys_sleep(1000);
     }
+    /* Как top: на выходе очищаем экран, чтобы не оставлять кадр. */
+    wr("\x1b[2J\x1b[H");
+    wr("\x1b[?25h");   /* вернуть курсор терминала */
     return 0;
 }
