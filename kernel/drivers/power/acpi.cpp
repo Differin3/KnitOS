@@ -121,6 +121,52 @@ static uint8_t  g_reset_value = 0;
 
 static bool g_acpi_avail = false;
 
+/* SMP: число доступных CPU и база локального APIC (из MADT / MSR). */
+static uint32_t g_ncpu = 1;
+static uint32_t g_lapic_base = 0;
+
+/* MADT (Multiple APIC Description Table), сигнатура "APIC". */
+struct acpi_madt {
+    struct acpi_sdt_header header;
+    uint32_t local_apic_address;
+    uint32_t flags;
+    /* далее — записи переменной длины: [type:1][length:1][...] */
+} __attribute__((packed));
+
+#define MADT_TYPE_LAPIC 0x0   /* Processor Local APIC */
+#define MADT_TYPE_X2APIC 0x9  /* Processor Local x2APIC */
+
+static void acpi_parse_madt(const struct acpi_sdt_header* h) {
+    if (!h || h->length < sizeof(struct acpi_madt)) return;
+    const struct acpi_madt* madt = (const struct acpi_madt*)h;
+
+    if (madt->local_apic_address) g_lapic_base = madt->local_apic_address;
+
+    uint32_t count = 0;
+    const uint8_t* p = (const uint8_t*)madt + sizeof(struct acpi_madt);
+    const uint8_t* end = (const uint8_t*)madt + h->length;
+    while (p + 2 <= end) {
+        uint8_t type = p[0];
+        uint8_t len = p[1];
+        if (len < 2 || p + len > end) break;
+        if (type == MADT_TYPE_LAPIC && len >= 8) {
+            /* [type][len][acpi_id][apic_id][flags:4] */
+            uint8_t apic_id = p[3];
+            uint32_t flags = p[4] | (p[5] << 8) | (p[6] << 16) | (p[7] << 24);
+            if (flags & 0x1) count++;   /* флаг "Enabled" */
+            (void)apic_id;
+        } else if (type == MADT_TYPE_X2APIC && len >= 16) {
+            uint32_t x2_flags = p[4] | (p[5] << 8) | (p[6] << 16) | (p[7] << 24);
+            if (x2_flags & 0x1) count++;
+        }
+        p += len;
+    }
+    if (count > 0) g_ncpu = count;
+}
+
+uint32_t acpi_cpu_count(void) { return g_ncpu; }
+uint32_t acpi_lapic_base(void) { return g_lapic_base; }
+
 static inline void acpi_outb(uint16_t port, uint8_t val) {
     asm volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
 }
@@ -393,6 +439,11 @@ bool acpi_init(void) {
 
             const struct acpi_fadt* fadt = (const struct acpi_fadt*)fadt_hdr;
             acpi_parse_fadt(fadt);
+
+            /* SMP: парсим MADT (число CPU + база LAPIC). */
+            const struct acpi_sdt_header* madt =
+                acpi_find_table(root, root_phys, "APIC");
+            if (madt) acpi_parse_madt(madt);
 
             if (g_pm1_ok && fadt->dsdt) {
                 const struct acpi_sdt_header* dsdt =

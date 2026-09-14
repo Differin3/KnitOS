@@ -13,6 +13,7 @@
 #include "mm/paging.h"
 #include "drivers/timer/pit.h"
 #include "drivers/network/core/netif.h"
+#include "drivers/power/acpi.h"
 #include "pipe.h"
 #include "pty.h"
 #include "crypto/sha256.h"
@@ -713,6 +714,7 @@ extern "C" int syscall_handler(struct syscall_args* args, uint32_t caller_cs) {
             }
             info.cpu_ticks = timer_jiffies();
             sched_foreach(sysinfo_idle_cb, &info.idle_ticks);
+            info.ncpu = acpi_cpu_count();
             if (user_copy_out(out, &info, sizeof(info), caller_cs, usermax) != 0) return -1;
             return 0;
         }

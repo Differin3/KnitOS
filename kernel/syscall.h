@@ -87,6 +87,7 @@ struct sysinfo_s {
     uint32_t net_tx_errors;
     uint32_t cpu_ticks;      /* всего тиков планировщика */
     uint32_t idle_ticks;     /* из них idle */
+    uint32_t ncpu;           /* число активных CPU */
 };
 
 #define TASKINFO_NAME_MAX 16

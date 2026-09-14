@@ -126,6 +126,7 @@ int main(int argc, char** argv) {
         num(dd, 1); wr("d ");
         pad2(hh); putchar(':'); pad2(mm); putchar(':'); pad2(ss);
         wr("   tasks "); num((uint32_t)n, 1);
+        wr("   cores "); num(si.ncpu, 1);
         wr("\n");
 
         /* CPU: прогресс-бар загрузки (как в top) */

@@ -635,7 +635,7 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
     
     disk_manager_init();
     
-    bool acpi_ok = acpi_init();
+     bool acpi_ok = acpi_init();
     terminal_set_cursor(current_row, 0);
     if (acpi_ok) {
         print_status("OK", "ACPI S5 + reset", vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK));
@@ -643,6 +643,27 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
         print_status("WARN", "ACPI not found (fallback ports)", vga_entry_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK));
     }
     current_row++;
+
+    /* SMP: детекция CPU через MADT. */
+    if (acpi_cpu_count() > 1) {
+        char msg[40];
+        int p = 0;
+        const char* pre = "SMP: ";
+        while (pre[p]) { msg[p] = pre[p]; p++; }
+        uint32_t v = acpi_cpu_count();
+        char d[8]; int t = 0;
+        if (v == 0) d[t++] = '0';
+        while (v > 0 && t < 7) { d[t++] = (char)('0' + (v % 10)); v /= 10; }
+        while (t > 0) msg[p++] = d[--t];
+        const char* post = " CPUs (APIC 0x";
+        int q = 0; while (post[q]) msg[p++] = post[q++];
+        uint32_t lap = acpi_lapic_base();
+        for (int sh = 28; sh >= 0; sh -= 4) msg[p++] = "0123456789abcdef"[(lap >> sh) & 0xf];
+        msg[p++] = ')';
+        msg[p] = 0;
+        print_status("OK", msg, vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK));
+        current_row++;
+    }
     
     // Начинаем вывод статусов сразу под последней строкой отладочного вывода
     current_row = (int)terminal_get_row();

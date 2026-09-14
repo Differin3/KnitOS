@@ -90,6 +90,7 @@ struct sysinfo_s {
     uint32_t net_tx_errors;
     uint32_t cpu_ticks;
     uint32_t idle_ticks;
+    uint32_t ncpu;
 };
 
 #define TASKINFO_NAME_MAX 16
