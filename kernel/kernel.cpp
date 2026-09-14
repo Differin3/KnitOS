@@ -1230,6 +1230,7 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
     };
     
     bool cmd_handled = true;
+    bool in_kcmd = false;
     auto process_command = [&](const char* cmd, size_t len) {
         cmd_handled = true;
         while (len && cmd[len-1]==' ') len--;
@@ -2454,6 +2455,9 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
            попадают в ftop и он может выйти. */
         if (len >= 4 && cmd[0]=='f'&&cmd[1]=='t'&&cmd[2]=='o'&&cmd[3]=='p' &&
             (len == 4 || cmd[4] == ' ')) {
+            /* Из user-space (kcmd/SSH) не обрабатываем: там должен exec'нуться
+               /tmp/ftop.elf, иначе sh.elf зациклится в kernel_run_command. */
+            if (in_kcmd) { cmd_handled = false; return; }
             extern char user_ftop_start[], user_ftop_end[];
             size_t sz = (size_t)(user_ftop_end - user_ftop_start);
             if (sz == 0) {
@@ -4813,9 +4817,11 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
         {
             char kc[256];
             if (kernel_kcmd_take(kc, sizeof(kc))) {
+                in_kcmd = true;
                 terminal_capture_begin(kernel_kcmd_resp(), kernel_kcmd_resp_cap());
                 process_command(kc, strlen(kc));
                 size_t rl = terminal_capture_end();
+                in_kcmd = false;
                 /* Если команда не распознана — сообщаем user-space, чтобы он
                    попробовал exec'нуть внешнее приложение, а не печатал
                    «Unknown command». */
@@ -4846,9 +4852,11 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
         terminal_cursor_tick(now_ms);
         
         /* Drain several keys per tick so IRQ buffer does not overflow under yield/FB. */
+        bool had_key = false;
         for (int kdrain = 0; kdrain < 16; kdrain++) {
             char c = poll_key();
             if (c == 0) break;
+            had_key = true;
 
             uint8_t uc = (uint8_t)c;
             if (uc == KEY_UP) {
@@ -4979,6 +4987,12 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
             }
         }
         sched_maybe_preempt();
+        if (!had_key) {
+            /* Нет ввода — блокируем консольную задачу, чтобы планировщик отдал
+               CPU задаче idle (hlt). Иначе systemd крутится в busy-loop и ядро
+               всегда показывает 100% загрузки одного ядра. */
+            task_block_timeout(WAIT_SLEEP, timer_ms() + 1);
+        }
         sched_yield();
     }
 }

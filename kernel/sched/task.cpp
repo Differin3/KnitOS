@@ -552,7 +552,9 @@ int task_wait_child(int pid, int* status_out) {
         /* Ребёнка с запрошенным pid больше нет (например, его зомби-слот
            переиспользован) — не висим вечно, как раньше. */
         if (pid >= 0 && !found) return -1;
-        sched_yield();
+        /* Блокируемся (а не крутимся в sched_yield): иначе задача остаётся
+           READY и не даёт планировщику уйти в idle (CPU всегда 100%). */
+        task_block_timeout(WAIT_SLEEP, timer_ms() + 5);
     }
 }
 

@@ -137,7 +137,7 @@ int pty_master_read(int idx, void* buf, uint32_t n) {
         }
         if (i > 0) break;
         if (p->slave_refs == 0) break; /* EOF: программа закрыла slave */
-        sched_yield();
+        task_sleep_ms(2); /* блок, а не busy-yield: не держим CPU на 100% */
     }
     return (int)i;
 }
@@ -164,7 +164,7 @@ int pty_slave_read(int idx, void* buf, uint32_t n) {
         if (i > 0) break;
         if (p->in_count == 0 && p->eof) { p->eof = 0; break; } /* Ctrl+D EOF */
         if (p->master_refs == 0) break; /* EOF: мастер закрыт */
-        sched_yield();
+        task_sleep_ms(2); /* блок, а не busy-yield */
     }
     return (int)i;
 }

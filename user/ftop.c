@@ -35,6 +35,32 @@ static void pct(uint32_t tenths, int w) {
     right(b, w);
 }
 
+/* Прогресс-бар загрузки: [####------] с цветом (зелёный/жёлтый/красный).
+   На консоли ядра ANSI-цвета игнорируются парсером, по SSH — видны. */
+#define BAR_WIDTH 24
+static void bar(uint32_t tenths, int width) {
+    if (tenths > 1000u) tenths = 1000u;
+    int filled = (int)((tenths * (uint32_t)width + 500u) / 1000u);
+    if (filled > width) filled = width;
+    const char* col = (tenths >= 800u) ? "\x1b[31m"
+                    : (tenths >= 500u) ? "\x1b[33m" : "\x1b[32m";
+    putchar('[');
+    wr(col);
+    for (int i = 0; i < filled; i++) putchar('#');
+    wr("\x1b[0m");
+    for (int i = filled; i < width; i++) putchar('-');
+    putchar(']');
+}
+
+/* Проценты в десятых (part/total*1000) без переполнения 32 бит. */
+static uint32_t pct1000(uint32_t part, uint32_t total) {
+    if (!total) return 0;
+    uint32_t denom = total / 1000u;
+    if (denom == 0) denom = 1;
+    uint32_t v = part / denom;
+    return v > 1000u ? 1000u : v;
+}
+
 static void fmt_bytes(uint32_t b, char* out, unsigned long cap) {
     if (b >= 1024u * 1024u) {
         snprintf(out, cap, "%u.%uM", b / (1024u * 1024u), (b / (1024u * 102u)) % 10u);
@@ -100,33 +126,35 @@ int main(int argc, char** argv) {
         num(dd, 1); wr("d ");
         pad2(hh); putchar(':'); pad2(mm); putchar(':'); pad2(ss);
         wr("   tasks "); num((uint32_t)n, 1);
-        wr("   cpu busy "); pct(busy_tenths, 5); wr("  idle ");
-        pct(dtotal ? (uint32_t)(((uint32_t)didle * 1000u) / dtotal) : 0, 5);
         wr("\n");
 
-        /* Память */
+        /* CPU: прогресс-бар загрузки (как в top) */
+        uint32_t idle_tenths = dtotal ? (uint32_t)(((uint32_t)didle * 1000u) / dtotal) : 0;
+        wr("cpu   "); bar(busy_tenths, BAR_WIDTH);
+        putchar(' '); pct(busy_tenths, 6);
+        wr("  idle "); pct(idle_tenths, 6);
+        wr("\n");
+
+        /* Память: бар + числа */
+        uint32_t mem_tenths = pct1000(si.heap_used, si.heap_total);
         fmt_bytes(si.heap_total, b1, sizeof(b1));
         fmt_bytes(si.heap_used, b2, sizeof(b2));
-        wr("mem   heap "); wr(b1); wr(": used "); wr(b2);
-        wr(" (");
-        num(si.heap_total ? (si.heap_used * 100u / si.heap_total) : 0, 1);
-        wr("%)  frames ");
-        num(si.frames_used, 1); putchar('/'); num(si.frames_total, 1);
-        wr("   asdir ");
-        num(si.asdir_used, 1); putchar('/'); num(si.asdir_max, 1);
-        wr("   pf "); num(si.pf_count, 1);
+        wr("mem   "); bar(mem_tenths, BAR_WIDTH);
+        putchar(' '); pct(mem_tenths, 6);
+        wr("  "); wr(b2); wr(" / "); wr(b1);
+        wr("   frames "); num(si.frames_used, 1); putchar('/'); num(si.frames_total, 1);
+        wr("  asdir "); num(si.asdir_used, 1); putchar('/'); num(si.asdir_max, 1);
+        wr("  pf "); num(si.pf_count, 1);
         wr("\n");
 
         /* Диск */
         if (si.disk_total) {
+            uint32_t disk_tenths = pct1000(si.disk_used, si.disk_total);
             fmt_bytes(si.disk_total, b1, sizeof(b1));
             fmt_bytes(si.disk_used, b2, sizeof(b2));
-            wr("disk  MOS "); wr(b1); wr(": used "); wr(b2);
-            wr(" (");
-            num(si.disk_used * 100u / si.disk_total, 1);
-            wr("%)  free ");
-            fmt_bytes(si.disk_free, b1, sizeof(b1));
-            wr(b1);
+            wr("disk  "); bar(disk_tenths, BAR_WIDTH);
+            putchar(' '); pct(disk_tenths, 6);
+            wr("  "); wr(b2); wr(" / "); wr(b1);
             wr("\n");
         }
 
