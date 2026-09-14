@@ -72,9 +72,10 @@ HTTP_GZIP_SRC = kernel/drivers/network/http_gzip.cpp
 SERIAL_LOG_SRC = kernel/serial_log.cpp
 HEAP_SRC = kernel/heap.cpp
 STRING_SRC = kernel/string.cpp
-KERNEL_OBJ = boot/boot.o boot/interrupts.o boot/user_demo.o kernel/sched/switch.o kernel/sched/task.o \
+KERNEL_OBJ = boot/boot.o boot/interrupts.o boot/trampoline_blob.o boot/user_demo.o kernel/sched/switch.o kernel/sched/task.o \
 	kernel/elf.o kernel/kernel.o kernel/idt.o kernel/serial_log.o kernel/heap.o kernel/string.o \
 	kernel/mm/paging.o kernel/vga_autotest.o kernel/keyboard_autotest.o kernel/user_autotest.o \
+	kernel/smp.o \
 	kernel/drivers/video/fb.o \
 	kernel/drivers/pic/pic.o kernel/drivers/timer/pit.o \
 	kernel/drivers/power/acpi.o kernel/drivers/power/rtc.o \
@@ -123,6 +124,12 @@ boot/boot.o: $(BOOT_SRC)
 
 boot/interrupts.o: $(INTERRUPTS_SRC)
 	$(ASM) $(ASMFLAGS) -o boot/interrupts.o $(INTERRUPTS_SRC)
+
+boot/trampoline.bin: boot/trampoline.asm
+	$(ASM) -f bin -o boot/trampoline.bin boot/trampoline.asm
+
+boot/trampoline_blob.o: boot/trampoline_blob.asm boot/trampoline.bin
+	$(ASM) $(ASMFLAGS) -i . -o boot/trampoline_blob.o boot/trampoline_blob.asm
 
 user/hello.elf: $(USER_HELLO_SRC) user/syscall.h user/link.ld
 	$(CC) -m32 -ffreestanding -fno-pic -fno-pie -fno-stack-protector -fno-builtin -fno-asynchronous-unwind-tables \
@@ -273,6 +280,9 @@ kernel/pty.o: kernel/pty.cpp kernel/pty.h kernel/sched/task.h
 
 kernel/service.o: kernel/service.cpp kernel/service.h kernel/sched/task.h kernel/vfs.h
 	$(CC) $(CFLAGS) -c -o kernel/service.o kernel/service.cpp
+
+kernel/smp.o: kernel/smp.cpp kernel/smp.h kernel/serial_log.h kernel/mm/paging.h kernel/drivers/power/acpi.h kernel/drivers/timer/pit.h kernel/heap.h
+	$(CC) $(CFLAGS) -c -o kernel/smp.o kernel/smp.cpp
 
 kernel/drivers/storage/ata.o: $(ATA_SRC) kernel/drivers/storage/ata.h
 	$(CC) $(CFLAGS) -c -o kernel/drivers/storage/ata.o $(ATA_SRC)
@@ -431,7 +441,7 @@ kernel/drivers/network/http_gzip.o: $(HTTP_GZIP_SRC) kernel/drivers/network/http
 	$(CC) $(CFLAGS) -c -o kernel/drivers/network/http_gzip.o $(HTTP_GZIP_SRC)
 
 clean:
-	rm -f $(KERNEL_OBJ) $(KERNEL_BIN) $(ISO) user/hello.o user/hello.elf user/demo2.o user/demo2.elf user/demo3.o user/demo3.elf user/launcher.o user/launcher.elf
+	rm -f $(KERNEL_OBJ) $(KERNEL_BIN) $(ISO) user/hello.o user/hello.elf user/demo2.o user/demo2.elf user/demo3.o user/demo3.elf user/launcher.o user/launcher.elf boot/trampoline.bin
 
 .PHONY: all check clean
 

@@ -2,6 +2,7 @@
 *.o
 *.iso
 iso/boot/kernel.bin
+boot/trampoline.bin
 
 # QEMU serial logs (host)
 logs/*.log

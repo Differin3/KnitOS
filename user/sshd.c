@@ -6,7 +6,7 @@
 // Auth: "none" is accepted for any user. Runs a PTY-backed shell.
 #include "lib/libk.h"
 
-#define SSH_PORT 2222
+#define SSH_PORT 22
 #define SSHV     "SSH-2.0-KnitOS_1.0"
 
 #define MSG_DISCONNECT      1

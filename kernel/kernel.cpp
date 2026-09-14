@@ -45,6 +45,7 @@
 #include "drivers/timer/pit.h"
 #include "drivers/power/acpi.h"
 #include "drivers/power/rtc.h"
+#include "smp.h"
 #include "sched/task.h"
 #include "pty.h"
 #include "kcmd.h"
@@ -518,7 +519,7 @@ static void boot_register_services(void) {
     extern char user_sshd_start[], user_sshd_end[];
     extern char user_ksshd_start[], user_ksshd_end[];
     extern char user_httpd_start[], user_httpd_end[];
-    service_register("sshd", "SSHv2 server :2222",
+    service_register("sshd", "SSHv2 server :22",
                      (const uint8_t*)user_sshd_start,
                      (size_t)(user_sshd_end - user_sshd_start), 0, 1, 1);
     service_register("httpd", "HTTP server :8080",
@@ -664,6 +665,7 @@ extern "C" void kernel_main(uint32_t multiboot_info) {
         print_status("OK", msg, vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK));
         current_row++;
     }
+    smp_init();
     
     // Начинаем вывод статусов сразу под последней строкой отладочного вывода
     current_row = (int)terminal_get_row();

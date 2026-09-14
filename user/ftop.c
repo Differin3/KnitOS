@@ -1,5 +1,5 @@
 // ftop — монитор ресурсов KnitOS (аналог top для нашей ОС).
-// Использование: ftop [N]  — N обновлений (по умолчанию 10); N=0 — до нажатия 'q'.
+// Использование: ftop [N]  — N обновлений (по умолчанию — до нажатия 'q').
 #include "lib/libk.h"
 
 static void wr(const char* s) { sys_write(1, s, strlen(s)); }
@@ -88,8 +88,8 @@ static const char* user_str(uint32_t uid) {
 }
 
 int main(int argc, char** argv) {
-    /* N — число обновлений (по умолчанию 10); N=0 — до нажатия 'q'. */
-    int count = 10;
+    /* N — число обновлений; N=0 (по умолчанию) — до нажатия 'q'. */
+    int count = 0;
     if (argc > 1 && argv[1] && argv[1][0]) {
         count = atoi(argv[1]);
         if (count < 0) count = 0;

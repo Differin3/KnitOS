@@ -36,5 +36,7 @@ void acpi_reboot(void);
 /* SMP: число доступных CPU и физическая база локального APIC. */
 uint32_t acpi_cpu_count(void);
 uint32_t acpi_lapic_base(void);
+uint32_t acpi_apic_id_count(void);
+uint8_t  acpi_apic_id(uint32_t i);
 
 #endif

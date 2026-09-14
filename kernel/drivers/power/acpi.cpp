@@ -124,6 +124,8 @@ static bool g_acpi_avail = false;
 /* SMP: число доступных CPU и база локального APIC (из MADT / MSR). */
 static uint32_t g_ncpu = 1;
 static uint32_t g_lapic_base = 0;
+static uint8_t  g_apic_ids[32];
+static uint32_t g_apic_id_count = 0;
 
 /* MADT (Multiple APIC Description Table), сигнатура "APIC". */
 struct acpi_madt {
@@ -153,11 +155,17 @@ static void acpi_parse_madt(const struct acpi_sdt_header* h) {
             /* [type][len][acpi_id][apic_id][flags:4] */
             uint8_t apic_id = p[3];
             uint32_t flags = p[4] | (p[5] << 8) | (p[6] << 16) | (p[7] << 24);
-            if (flags & 0x1) count++;   /* флаг "Enabled" */
-            (void)apic_id;
+            if (flags & 0x1) {   /* флаг "Enabled" */
+                count++;
+                if (g_apic_id_count < 32) g_apic_ids[g_apic_id_count++] = apic_id;
+            }
         } else if (type == MADT_TYPE_X2APIC && len >= 16) {
-            uint32_t x2_flags = p[4] | (p[5] << 8) | (p[6] << 16) | (p[7] << 24);
-            if (x2_flags & 0x1) count++;
+            uint32_t x2_id = p[4] | (p[5] << 8) | (p[6] << 16) | (p[7] << 24);
+            uint32_t x2_flags = p[8] | (p[9] << 8) | (p[10] << 16) | (p[11] << 24);
+            if (x2_flags & 0x1) {
+                count++;
+                if (g_apic_id_count < 32) g_apic_ids[g_apic_id_count++] = (uint8_t)x2_id;
+            }
         }
         p += len;
     }
@@ -166,6 +174,8 @@ static void acpi_parse_madt(const struct acpi_sdt_header* h) {
 
 uint32_t acpi_cpu_count(void) { return g_ncpu; }
 uint32_t acpi_lapic_base(void) { return g_lapic_base; }
+uint32_t acpi_apic_id_count(void) { return g_apic_id_count; }
+uint8_t  acpi_apic_id(uint32_t i) { return (i < g_apic_id_count) ? g_apic_ids[i] : 0; }
 
 static inline void acpi_outb(uint16_t port, uint8_t val) {
     asm volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
