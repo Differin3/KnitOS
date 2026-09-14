@@ -190,3 +190,66 @@ default_handler:
     out 0x20, al
     iret
 
+; --- Exception stubs (vectors 0..31): push vector + optional error code,
+;     call exception_handler which logs to serial and halts. ---
+extern exception_handler
+%macro ISR_NOERR 1
+global isr%1
+isr%1:
+    push dword 0
+    push dword %1
+    jmp isr_common
+%endmacro
+%macro ISR_ERRCODE 1
+global isr%1
+isr%1:
+    push dword %1
+    jmp isr_common
+%endmacro
+
+ISR_NOERR 0
+ISR_NOERR 1
+ISR_NOERR 2
+ISR_NOERR 3
+ISR_NOERR 4
+ISR_NOERR 5
+ISR_NOERR 6
+ISR_NOERR 7
+ISR_ERRCODE 8
+ISR_NOERR 9
+ISR_ERRCODE 10
+ISR_ERRCODE 11
+ISR_ERRCODE 12
+ISR_ERRCODE 13
+ISR_ERRCODE 14
+ISR_NOERR 15
+ISR_NOERR 16
+ISR_ERRCODE 17
+ISR_NOERR 18
+ISR_NOERR 19
+ISR_NOERR 20
+ISR_ERRCODE 21
+ISR_NOERR 22
+ISR_NOERR 23
+ISR_NOERR 24
+ISR_NOERR 25
+ISR_NOERR 26
+ISR_NOERR 27
+ISR_NOERR 28
+ISR_ERRCODE 29
+ISR_ERRCODE 30
+ISR_NOERR 31
+
+; frame layout at [eax]: vec, err, eip, cs, eflags, (esp, ss)
+isr_common:
+    pushad
+    cld
+    mov eax, esp
+    add eax, 32
+    push eax
+    call exception_handler
+    add esp, 4
+    popad
+    add esp, 8
+    iret
+

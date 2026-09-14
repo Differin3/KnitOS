@@ -310,3 +310,42 @@ char serial_poll_char(void) {
     }
     return 0;
 }
+
+/* ---- debug output (always to COM1, ignores log level) ---- */
+void debug_putc(char c) {
+    for (int i = 0; i < 100000; i++) {
+        if (ser_inb(COM1_STATUS) & 0x20) { ser_outb(COM1_DATA, (uint8_t)c); return; }
+    }
+}
+void debug_puts(const char* s) {
+    if (!s) return;
+    while (*s) { if (*s == '\n') debug_putc('\r'); debug_putc(*s++); }
+}
+void debug_putx(uint32_t v) {
+    debug_puts("0x");
+    for (int i = 28; i >= 0; i -= 4) debug_putc("0123456789abcdef"[(v >> i) & 0xf]);
+}
+void debugf(const char* fmt, ...) {
+    __builtin_va_list ap;
+    __builtin_va_start(ap, fmt);
+    for (; *fmt; fmt++) {
+        if (*fmt != '%') { debug_putc(*fmt); continue; }
+        fmt++;
+        switch (*fmt) {
+            case 's': debug_puts(__builtin_va_arg(ap, const char*)); break;
+            case 'x': debug_putx((uint32_t)(unsigned long)__builtin_va_arg(ap, void*)); break;
+            case 'u': case 'd': {
+                char s[14]; int n = 0; long v = (*fmt == 'd') ? __builtin_va_arg(ap, long) : (long)__builtin_va_arg(ap, unsigned long);
+                int neg = 0; if (v < 0) { neg = 1; v = -v; }
+                if (v == 0) s[n++] = '0';
+                while (v && n < 12) { s[n++] = (char)('0' + v % 10); v /= 10; }
+                if (neg) debug_putc('-');
+                while (n--) debug_putc(s[n]);
+                break;
+            }
+            case 'c': debug_putc((char)__builtin_va_arg(ap, int)); break;
+            default: debug_putc('%'); debug_putc(*fmt); break;
+        }
+    }
+    __builtin_va_end(ap);
+}

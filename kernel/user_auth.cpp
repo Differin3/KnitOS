@@ -133,7 +133,7 @@ uint16_t users_next_uid(void) {
 }
 
 static int write_passwd_db(void) {
-    char newpw[SHADOW_BUF];
+    static char newpw[SHADOW_BUF];
     size_t total = 0;
     for (int i = 0; i < g_user_count; i++) {
         const struct user_record* pu = &g_users[i];
@@ -191,7 +191,7 @@ int user_del(const char* name) {
     if (slot < 0) return -1;
     /* убрать запись из shadow */
     {
-        char tmp[SHADOW_BUF];
+        static char tmp[SHADOW_BUF];
         size_t tn = 0;
         size_t r = 0;
         while (r < g_shadow_len) {
@@ -248,7 +248,7 @@ int user_set_password(const char* name, const char* password) {
     size_t ll = shadow_line(name, salt, h, line, sizeof(line));
 
     /* Заменить или дописать строку в g_shadow. */
-    char tmp[SHADOW_BUF];
+    static char tmp[SHADOW_BUF];
     size_t tn = 0;
     size_t r = 0;
     while (r < g_shadow_len) {
@@ -317,7 +317,7 @@ bool user_check_password(const char* name, const char* password) {
 
 static void create_default_users(void) {
     /* root: uid 0, без пароля (dev-режим) */
-    char pw[SHADOW_BUF];
+    static char pw[SHADOW_BUF];
     size_t n = 0;
     const char* rootline =
         "root:x:0:0:root:/root:/bin/sh\n"
@@ -334,7 +334,7 @@ static void create_default_users(void) {
     uint32_t h = hash_password(salt, "demo");
     char line[UHASH_LEN + 48];
     size_t ll = shadow_line("demo", salt, h, line, sizeof(line));
-    char sh[SHADOW_BUF];
+    static char sh[SHADOW_BUF];
     size_t sn = 0;
     memcpy(sh + sn, line, ll); sn += ll;
     sh[sn++] = '\n';
@@ -348,7 +348,7 @@ int users_init(void) {
     for (int i = 0; i < GMAX_GROUPS; i++) memset(&g_groups[i], 0, sizeof(struct group_record));
     g_group_count = 0;
 
-    char pw[SHADOW_BUF];
+    static char pw[SHADOW_BUF];
     int pr = fs_read(PASSWD_PATH, pw, sizeof(pw) - 1);
     if (pr <= 0) {
         create_default_users();
@@ -470,7 +470,7 @@ void user_auth_dump(void) {
 /* ---- Группы (/etc/group = name:gid:members) ---- */
 
 static int write_group_db(void) {
-    char out[SHADOW_BUF];
+    static char out[SHADOW_BUF];
     size_t total = 0;
     for (int i = 0; i < g_group_count; i++) {
         const struct group_record* g = &g_groups[i];
@@ -498,7 +498,7 @@ static void create_default_groups(void) {
 int groups_init(void) {
     for (int i = 0; i < GMAX_GROUPS; i++) memset(&g_groups[i], 0, sizeof(struct group_record));
     g_group_count = 0;
-    char buf[SHADOW_BUF];
+    static char buf[SHADOW_BUF];
     int r = fs_read(GROUP_PATH, buf, sizeof(buf) - 1);
     if (r <= 0) {
         create_default_groups();

@@ -33,4 +33,10 @@ void log_driver_event(const char* name, const char* event);
 // Двусторонний COM1: ввод с хоста (QEMU -serial tcp:...)
 char serial_poll_char(void);
 
+/* Отладочный вывод всегда пишет в COM1 (независимо от уровня лога). */
+void debugf(const char* fmt, ...);
+void debug_putc(char c);
+void debug_puts(const char* s);
+void debug_putx(uint32_t v);
+
 #endif

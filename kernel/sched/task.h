@@ -6,7 +6,7 @@
 #include <stdbool.h>
 
 #define TASK_MAX         32
-#define TASK_STACK_SIZE  8192
+#define TASK_STACK_SIZE  16384
 #define TASK_NAME_MAX    16
 #define TASK_SLICE_TICKS 4
 #define TASK_PID_SYSTEMD 0
